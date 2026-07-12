@@ -19,6 +19,7 @@ from fastapi.responses import JSONResponse, RedirectResponse
 from .config import settings
 from .session_store import session_store
 from . import keycloak_client as kc
+from . import crm_client
 
 # Временное хранилище state → code_verifier на время авторизационного редиректа.
 # Живёт недолго (между /auth/login и /auth/callback). Для одного инстанса — dict;
@@ -61,12 +62,16 @@ def _set_session_cookie(response: Response, session_id: str) -> None:
 #  Авторизация
 # --------------------------------------------------------------------------- #
 @app.get("/auth/login")
-async def login():
-    """Стартует PKCE-флоу: генерирует verifier/challenge и редиректит в Keycloak."""
+async def login(idp: str | None = None):
+    """Стартует PKCE-флоу: генерирует verifier/challenge и редиректит в Keycloak.
+
+    Параметр idp (например 'yandex') прокидывается в Keycloak как kc_idp_hint —
+    пользователя сразу отправляют на выбранный внешний IdP (Identity Brokering).
+    """
     state = secrets.token_urlsafe(32)
     code_verifier, code_challenge = kc.generate_pkce_pair()
     _login_flows[state] = code_verifier
-    url = kc.build_authorization_url(state, code_challenge)
+    url = kc.build_authorization_url(state, code_challenge, idp_hint=idp)
     return RedirectResponse(url=url, status_code=302)
 
 
@@ -105,26 +110,93 @@ async def logout(request: Request):
     return response
 
 
+def _decode(access_token: str) -> dict:
+    import jwt
+
+    return jwt.decode(access_token, options={"verify_signature": False})
+
+
+def _is_yandex_login(claims: dict) -> bool:
+    """Определяет, вошёл ли пользователь через Яндекс (Identity Brokering).
+
+    Keycloak кладёт alias внешнего IdP в claim identity_provider.
+    """
+    return claims.get("identity_provider") == settings.YANDEX_IDP_ALIAS
+
+
 @app.get("/auth/userinfo")
 async def userinfo(request: Request):
-    """Проверяет, авторизован ли пользователь (для фронтенда)."""
+    """Проверяет, авторизован ли пользователь (для фронтенда).
+
+    Если вход был через Яндекс и пользователь ещё не дал согласие на обработку
+    данных — возвращаем needs_consent=true, чтобы фронтенд показал экран запроса.
+    """
     result = await _ensure_valid_session(request)
     if result is None:
         raise HTTPException(status_code=401, detail="Not authenticated")
     session, _new_session_id = result
-    import jwt
 
-    claims = jwt.decode(
-        session["access_token"], options={"verify_signature": False}
-    )
+    claims = _decode(session["access_token"])
+    subject = claims.get("sub")
+    via_yandex = _is_yandex_login(claims)
+
+    needs_consent = False
+    if via_yandex:
+        # Согласие спрашиваем один раз: если его ещё нет в CRM — просим.
+        needs_consent = not await crm_client.has_consent(subject)
+
     response = JSONResponse(
         {
             "username": claims.get("preferred_username"),
             "email": claims.get("email"),
             "roles": claims.get("realm_access", {}).get("roles", []),
+            "identity_provider": claims.get("identity_provider"),
+            "needs_consent": needs_consent,
         }
     )
     _set_session_cookie(response, _new_session_id)
+    return response
+
+
+@app.post("/auth/consent")
+async def consent(request: Request):
+    """Обрабатывает решение пользователя по согласию на обработку данных.
+
+    Тело: {"granted": true|false}.
+    - granted=true: запрашиваем профиль у Яндекса (broker token) и сохраняем
+      его в CRM вместе с фактом согласия;
+    - granted=false: фиксируем отказ, профиль не сохраняем.
+    """
+    result = await _ensure_valid_session(request)
+    if result is None:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    session, new_session_id = result
+
+    body = await request.json()
+    granted = bool(body.get("granted"))
+
+    claims = _decode(session["access_token"])
+    subject = claims.get("sub")
+    if not _is_yandex_login(claims):
+        raise HTTPException(
+            status_code=400, detail="Consent applies only to Yandex login"
+        )
+
+    await crm_client.record_consent(subject, granted)
+
+    saved = False
+    if granted:
+        # Забираем токен Яндекса из Keycloak и тянем профиль напрямую у Яндекса.
+        yandex_token = await kc.get_broker_token(
+            session["access_token"], settings.YANDEX_IDP_ALIAS
+        )
+        if yandex_token:
+            profile = await kc.fetch_yandex_profile(yandex_token)
+            await crm_client.save_profile(subject, profile)
+            saved = True
+
+    response = JSONResponse({"granted": granted, "profile_saved": saved})
+    _set_session_cookie(response, new_session_id)
     return response
 
 

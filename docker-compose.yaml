@@ -69,6 +69,35 @@ services:
     ports:
       - "6379:6379"
 
+  # БД CRM-сервиса — система-источник истины по клиентам BionicPRO.
+  crm_db:
+    image: postgres:14
+    container_name: bionicpro-crm-db
+    environment:
+      POSTGRES_DB: crm_db
+      POSTGRES_USER: crm_user
+      POSTGRES_PASSWORD: crm_password
+    volumes:
+      - crm_db_data:/var/lib/postgresql/data
+    ports:
+      - "5434:5432"
+
+  # CRM API — владелец клиентских данных. Сюда сохраняется профиль
+  # пользователя из Яндекса и журнал согласий. Auth Proxy ходит только сюда,
+  # напрямую в БД не лезет (соблюдение границ сервисов).
+  crm-api:
+    build:
+      context: ./crm-api
+      dockerfile: Dockerfile
+    ports:
+      - "8090:8080"
+    environment:
+      DATABASE_URL: postgresql://crm_user:crm_password@crm_db:5432/crm_db
+      KEYCLOAK_URL: http://keycloak:8080
+      KEYCLOAK_REALM: reports-realm
+    depends_on:
+      - crm_db
+
   bionicpro-auth:
     build:
       context: ./bionicpro-auth
@@ -89,9 +118,16 @@ services:
       COOKIE_SECURE: "false"
       # Ключ Fernet для шифрования refresh_token. В проде — из секрета.
       FERNET_KEY: "3sJgQe0hKcq1Xr9mVt7yZbNwPdLfUvHsAoIkEjMcRnQ="
+      # CRM API — куда Auth Proxy отправляет профиль из Яндекса и согласия.
+      CRM_API_URL: http://crm-api:8080
+      # Alias внешнего IdP (Identity Brokering) — по нему сервис узнаёт вход через Яндекс.
+      YANDEX_IDP_ALIAS: yandex
+      # Endpoint Яндекса для получения профиля по broker access_token.
+      YANDEX_USERINFO_URL: https://login.yandex.ru/info?format=json
     depends_on:
       - keycloak
       - redis
+      - crm-api
 
   frontend:
     build:
@@ -107,3 +143,4 @@ services:
 volumes:
   openldap_data:
   openldap_config:
+  crm_db_data:

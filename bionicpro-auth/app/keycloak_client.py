@@ -28,8 +28,14 @@ def generate_pkce_pair() -> tuple[str, str]:
     return code_verifier, code_challenge
 
 
-def build_authorization_url(state: str, code_challenge: str) -> str:
-    """Формирует URL для редиректа пользователя на страницу входа Keycloak."""
+def build_authorization_url(
+    state: str, code_challenge: str, idp_hint: Optional[str] = None
+) -> str:
+    """Формирует URL для редиректа пользователя на страницу входа Keycloak.
+
+    Если задан idp_hint (alias внешнего IdP, например 'yandex'), добавляем
+    kc_idp_hint — Keycloak сразу перенаправит пользователя на этот IdP.
+    """
     params = {
         "client_id": settings.CLIENT_ID,
         "response_type": "code",
@@ -39,6 +45,8 @@ def build_authorization_url(state: str, code_challenge: str) -> str:
         "code_challenge": code_challenge,
         "code_challenge_method": "S256",
     }
+    if idp_hint:
+        params["kc_idp_hint"] = idp_hint
     return f"{settings.authorization_endpoint}?{urlencode(params)}"
 
 
@@ -83,6 +91,46 @@ async def logout(refresh_token: str) -> None:
         await client.post(
             f"{settings.issuer}/protocol/openid-connect/logout", data=data
         )
+
+
+async def get_broker_token(access_token: str, alias: str) -> Optional[str]:
+    """Достаёт из Keycloak access_token внешнего IdP (Яндекса).
+
+    Работает при storeToken=true у IdP: Keycloak хранит токен Яндекса и отдаёт
+    его по /broker/<alias>/token, авторизуя запрос access_token'ом Keycloak.
+    Возвращает access_token Яндекса либо None.
+    """
+    url = settings.broker_token_endpoint(alias)
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        resp = await client.get(
+            url, headers={"Authorization": f"Bearer {access_token}"}
+        )
+        if resp.status_code != 200:
+            return None
+        # Ответ может быть form-encoded или JSON в зависимости от версии.
+        ctype = resp.headers.get("content-type", "")
+        if "application/json" in ctype:
+            return resp.json().get("access_token")
+        # form-encoded: access_token=...&token_type=...
+        from urllib.parse import parse_qs
+
+        parsed = parse_qs(resp.text)
+        vals = parsed.get("access_token")
+        return vals[0] if vals else None
+
+
+async def fetch_yandex_profile(yandex_access_token: str) -> dict:
+    """Запрашивает профиль пользователя у Яндекса по его access_token.
+
+    OAuth-токен Яндекса передаётся в заголовке по схеме 'OAuth <token>'.
+    """
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        resp = await client.get(
+            settings.YANDEX_USERINFO_URL,
+            headers={"Authorization": f"OAuth {yandex_access_token}"},
+        )
+        resp.raise_for_status()
+        return resp.json()
 
 
 def is_access_token_expired(access_token: str, leeway_seconds: int = 10) -> bool:

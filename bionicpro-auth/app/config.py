@@ -34,6 +34,19 @@ class Settings:
     # Report API, к которому bionicpro-auth проксирует запросы, подставляя токен.
     UPSTREAM_API_URL: str = os.getenv("UPSTREAM_API_URL", "http://reports-api:8080")
 
+    # --- CRM API (владелец клиентских данных) ---
+    # Куда Auth Proxy отправляет профиль из Яндекса и согласия пользователя.
+    CRM_API_URL: str = os.getenv("CRM_API_URL", "http://crm-api:8080")
+
+    # --- Identity Brokering (Яндекс ID) ---
+    # Alias внешнего IdP в Keycloak. По claim identity_provider в токене
+    # сервис понимает, что пользователь вошёл через Яндекс.
+    YANDEX_IDP_ALIAS: str = os.getenv("YANDEX_IDP_ALIAS", "yandex")
+    # Endpoint Яндекса для получения профиля по broker access_token.
+    YANDEX_USERINFO_URL: str = os.getenv(
+        "YANDEX_USERINFO_URL", "https://login.yandex.ru/info?format=json"
+    )
+
     # --- Redis (распределённый кеш сессий) ---
     REDIS_URL: str = os.getenv("REDIS_URL", "redis://redis:6379/0")
 
@@ -69,6 +82,13 @@ class Settings:
     @property
     def logout_endpoint(self) -> str:
         return f"{self.public_issuer}/protocol/openid-connect/logout"
+
+    def broker_token_endpoint(self, alias: str) -> str:
+        """Endpoint Keycloak для получения сохранённого токена внешнего IdP.
+
+        Требует storeToken=true у IdP и роль broker read-token у клиента.
+        """
+        return f"{self.issuer}/broker/{alias}/token"
 
 
 settings = Settings()
