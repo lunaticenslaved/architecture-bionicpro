@@ -1,18 +1,4 @@
-# BionicPRO — защищённая аутентификация (учебный спринт по архитектуре)
-
-Репозиторий содержит поэтапное решение по усилению безопасности сервиса
-протезов BionicPRO после взлома и утечки персональных/медицинских данных.
-
-## Что реализовано по задачам
-
-| Задача | Что сделано | Документация |
-|--------|-------------|--------------|
-| 1 | Архитектурное решение + доработка C4-диаграммы | [`Task1/README.md`](Task1/README.md) |
-| 2 | Переход с Code Grant на **PKCE S256** (фронт + Keycloak) | — |
-| 3 | Бэкенд **bionicpro-auth** (BFF/Auth Proxy): токены на сервере, Redis, ротация сессий | [`bionicpro-auth/README.md`](bionicpro-auth/README.md) |
-| 4 | **LDAP-федерация** (OpenLDAP) + маппинг ролей представительств | [`ldap/README.md`](ldap/README.md) |
-| 5 | Обязательная **OTP-аутентификация** (TOTP, Google Authenticator/FreeOTP) | [`keycloak/README.md`](keycloak/README.md) |
-| 6 | **Identity Brokering через Яндекс ID** + согласие + сохранение профиля в CRM | ниже |
+# BionicPRO
 
 ## Состав окружения (docker-compose)
 
@@ -35,16 +21,11 @@
 ## 0. Предварительная подготовка
 
 ```bash
-# (для Задачи 6) создать корневой .env из шаблона и вписать реквизиты Яндекса
 cp .env.example .env
 #   затем указать в .env реальные YANDEX_CLIENT_ID / YANDEX_CLIENT_SECRET
 #   (со страницы приложения на https://oauth.yandex.ru).
 #   Redirect URI приложения Яндекса:
 #   http://localhost:8080/realms/reports-realm/broker/yandex/endpoint
-#
-#   docker compose передаёт эти значения в контейнер keycloak, а тот
-#   подставляет их в realm-export.json (${env.YANDEX_CLIENT_ID}) при импорте.
-#   Файл .env добавлен в .gitignore и в репозиторий не попадает.
 
 # Поднять всё окружение
 docker compose up -d --build
@@ -53,7 +34,7 @@ docker compose up -d --build
 docker compose ps
 ```
 
-Дождаться, пока Keycloak импортирует realm (в логах — `Imported realm reports-realm`):
+Дождаться, пока Keycloak импортирует realm:
 
 ```bash
 docker compose logs -f keycloak | grep -i import
@@ -68,10 +49,7 @@ docker compose logs -f keycloak | grep -i import
 1. Открыть <http://localhost:3000>, нажать **Login**.
 2. В адресной строке при редиректе на Keycloak проверить наличие параметров
    `code_challenge=...` и `code_challenge_method=S256`.
-3. В админке Keycloak (<http://localhost:8080>, `admin/admin`) →
-   realm `reports-realm` → Clients → `reports-frontend` → вкладка Advanced →
-   **Proof Key for Code Exchange Code Challenge Method = S256**.
-4. У клиента `reports-frontend` **Direct Access Grants = OFF**.
+3. В форме регистрации ввести `user1/password123`.
 
 ✅ Ожидание: вход проходит, в запросе есть `code_challenge` с методом S256.
 
@@ -85,17 +63,13 @@ docker compose logs -f keycloak | grep -i import
 2. DevTools → Application → Cookies для `localhost:8000`: есть cookie
    `session_id` с флагами **HttpOnly** и **SameSite=Lax**. Токенов (JWT) в
    cookie/localStorage быть **не должно**.
-3. Проверить состояние сессии:
-   ```bash
-   curl -i -c cookies.txt "http://localhost:8000/auth/userinfo"
-   ```
-4. Проверить, что токены хранятся в Redis (в зашифрованном виде refresh_token):
+3. Проверить, что токены хранятся в Redis (в зашифрованном виде refresh_token):
    ```bash
    docker exec -it $(docker compose ps -q redis) redis-cli KEYS "session:*"
    ```
-5. **Ротация session_id:** повторный запрос к защищённому ресурсу выдаёт новую
+4. **Ротация session_id:** повторный запрос к защищённому ресурсу выдаёт новую
    cookie `session_id` (значение меняется), старый ключ в Redis удаляется.
-6. **Авто-refresh:** access_token живёт 120 сек (`accessTokenLifespan: 120`),
+5. **Авто-refresh:** access_token живёт 120 сек (`accessTokenLifespan: 120`),
    TTL сессии — 1800 сек. Через >2 мин запрос всё ещё работает — Auth Proxy сам
    обновил токен по refresh_token.
 

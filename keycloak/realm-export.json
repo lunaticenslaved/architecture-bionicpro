@@ -179,7 +179,6 @@
         {
           "name": "ldap-bionicpro",
           "providerId": "ldap",
-          "providerType": "org.keycloak.storage.UserStorageProvider",
           "config": {
             "enabled": ["true"],
             "priority": ["1"],
