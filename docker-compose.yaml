@@ -20,7 +20,7 @@ services:
       KC_DB_URL: jdbc:postgresql://keycloak_db:5432/keycloak_db
       KC_DB_USERNAME: keycloak_user
       KC_DB_PASSWORD: keycloak_password
-    command: 
+    command:
       - start-dev
       - --import-realm
     volumes:
@@ -29,6 +29,41 @@ services:
       - "8080:8080"
     depends_on:
       - keycloak_db
+      - openldap
+
+  # LDAP-сервер представительства BionicPRO в другой стране.
+  # Данные пользователей и ролей хранятся локально (data residency),
+  # Keycloak ходит сюда за аутентификацией по federation.
+  openldap:
+    image: osixia/openldap:1.5.0
+    container_name: bionicpro-openldap
+    command: --copy-service
+    environment:
+      LDAP_ORGANISATION: "BionicPRO"
+      LDAP_DOMAIN: "example.com"
+      LDAP_ADMIN_PASSWORD: "admin"
+      LDAP_BASE_DN: "dc=example,dc=com"
+    volumes:
+      # Bootstrap LDIF с пользователями и ролями представительства.
+      - ./ldap/config.ldif:/container/service/slapd/assets/config/bootstrap/ldif/custom/config.ldif:ro
+      - openldap_data:/var/lib/ldap
+      - openldap_config:/etc/ldap/slapd.d
+    ports:
+      - "389:389"
+      - "636:636"
+
+  # Веб-UI для инспекции содержимого LDAP (пользователи, группы, роли).
+  phpldapadmin:
+    image: osixia/phpldapadmin:0.9.0
+    container_name: bionicpro-phpldapadmin
+    environment:
+      PHPLDAPADMIN_LDAP_HOSTS: openldap
+      PHPLDAPADMIN_HTTPS: "false"
+    ports:
+      - "8081:80"
+    depends_on:
+      - openldap
+
   redis:
     image: redis:7-alpine
     ports:
@@ -68,3 +103,7 @@ services:
       REACT_APP_AUTH_URL: http://localhost:8000
     depends_on:
       - bionicpro-auth
+
+volumes:
+  openldap_data:
+  openldap_config:

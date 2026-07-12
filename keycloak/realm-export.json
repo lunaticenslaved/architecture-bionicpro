@@ -151,5 +151,105 @@
           "access.token.lifespan": "120"
         }
       }
-    ]
+    ],
+    "components": {
+      "org.keycloak.storage.UserStorageProvider": [
+        {
+          "name": "ldap-bionicpro",
+          "providerId": "ldap",
+          "providerType": "org.keycloak.storage.UserStorageProvider",
+          "config": {
+            "enabled": ["true"],
+            "priority": ["1"],
+            "fullSyncPeriod": ["-1"],
+            "changedSyncPeriod": ["-1"],
+            "cachePolicy": ["DEFAULT"],
+            "batchSizeForSync": ["1000"],
+            "editMode": ["READ_ONLY"],
+            "importEnabled": ["true"],
+            "syncRegistrations": ["false"],
+            "vendor": ["other"],
+            "usernameLDAPAttribute": ["uid"],
+            "rdnLDAPAttribute": ["uid"],
+            "uuidLDAPAttribute": ["entryUUID"],
+            "userObjectClasses": ["inetOrgPerson"],
+            "connectionUrl": ["ldap://openldap:389"],
+            "usersDn": ["ou=People,dc=example,dc=com"],
+            "authType": ["simple"],
+            "bindDn": ["cn=admin,dc=example,dc=com"],
+            "bindCredential": ["admin"],
+            "searchScope": ["1"],
+            "useTruststoreSpi": ["ldapsOnly"],
+            "connectionPooling": ["true"],
+            "pagination": ["true"],
+            "allowKerberosAuthentication": ["false"],
+            "trustEmail": ["true"]
+          },
+          "subComponents": {
+            "org.keycloak.storage.ldap.mappers.LDAPStorageMapper": [
+              {
+                "name": "username",
+                "providerId": "user-attribute-ldap-mapper",
+                "config": {
+                  "user.model.attribute": ["username"],
+                  "ldap.attribute": ["uid"],
+                  "read.only": ["true"],
+                  "always.read.value.from.ldap": ["false"],
+                  "is.mandatory.in.ldap": ["true"]
+                }
+              },
+              {
+                "name": "first name",
+                "providerId": "user-attribute-ldap-mapper",
+                "config": {
+                  "user.model.attribute": ["firstName"],
+                  "ldap.attribute": ["cn"],
+                  "read.only": ["true"],
+                  "always.read.value.from.ldap": ["true"],
+                  "is.mandatory.in.ldap": ["true"]
+                }
+              },
+              {
+                "name": "last name",
+                "providerId": "user-attribute-ldap-mapper",
+                "config": {
+                  "user.model.attribute": ["lastName"],
+                  "ldap.attribute": ["sn"],
+                  "read.only": ["true"],
+                  "always.read.value.from.ldap": ["true"],
+                  "is.mandatory.in.ldap": ["true"]
+                }
+              },
+              {
+                "name": "email",
+                "providerId": "user-attribute-ldap-mapper",
+                "config": {
+                  "user.model.attribute": ["email"],
+                  "ldap.attribute": ["mail"],
+                  "read.only": ["true"],
+                  "always.read.value.from.ldap": ["true"],
+                  "is.mandatory.in.ldap": ["false"]
+                }
+              },
+              {
+                "name": "role-mapper-bionicpro",
+                "providerId": "role-ldap-mapper",
+                "config": {
+                  "mode": ["READ_ONLY"],
+                  "membership.attribute.type": ["DN"],
+                  "roles.dn": ["ou=Groups,dc=example,dc=com"],
+                  "role.name.ldap.attribute": ["cn"],
+                  "role.object.classes": ["groupOfNames"],
+                  "membership.ldap.attribute": ["member"],
+                  "membership.user.ldap.attribute": ["uid"],
+                  "memberof.ldap.attribute": ["memberOf"],
+                  "use.realm.roles.mapping": ["true"],
+                  "user.roles.retrieve.strategy": ["LOAD_ROLES_BY_MEMBER_ATTRIBUTE"]
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
   }
