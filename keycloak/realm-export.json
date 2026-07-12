@@ -1,6 +1,12 @@
 {
     "realm": "reports-realm",
     "enabled": true,
+    "accessTokenLifespan": 120,
+    "accessTokenLifespanForImplicitFlow": 120,
+    "ssoSessionIdleTimeout": 1800,
+    "ssoSessionMaxLifespan": 36000,
+    "revokeRefreshToken": true,
+    "refreshTokenMaxReuse": 0,
     "roles": {
       "realm": [
         {
@@ -126,8 +132,24 @@
         "clientId": "reports-api",
         "enabled": true,
         "clientAuthenticatorType": "client-secret",
-        "secret": "oNwoLQdvJAvRcL89SydqCWCe5ry1jMgq", 
+        "secret": "oNwoLQdvJAvRcL89SydqCWCe5ry1jMgq",
         "bearerOnly": true
+      },
+      {
+        "clientId": "bionicpro-auth",
+        "enabled": true,
+        "publicClient": false,
+        "clientAuthenticatorType": "client-secret",
+        "secret": "bionicpro-auth-secret-CHANGE-ME",
+        "standardFlowEnabled": true,
+        "directAccessGrantsEnabled": false,
+        "serviceAccountsEnabled": false,
+        "redirectUris": ["http://localhost:8000/auth/callback"],
+        "webOrigins": ["http://localhost:3000"],
+        "attributes": {
+          "pkce.code.challenge.method": "S256",
+          "access.token.lifespan": "120"
+        }
       }
     ]
   }
