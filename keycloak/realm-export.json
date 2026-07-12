@@ -287,8 +287,8 @@
         "linkOnly": false,
         "firstBrokerLoginFlowAlias": "first broker login",
         "config": {
-          "clientId": "YANDEX_CLIENT_ID_CHANGE_ME",
-          "clientSecret": "YANDEX_CLIENT_SECRET_CHANGE_ME",
+          "clientId": "${env.YANDEX_CLIENT_ID}",
+          "clientSecret": "${env.YANDEX_CLIENT_SECRET}",
           "authorizationUrl": "https://oauth.yandex.ru/authorize",
           "tokenUrl": "https://oauth.yandex.ru/token",
           "userInfoUrl": "https://login.yandex.ru/info?format=json",
