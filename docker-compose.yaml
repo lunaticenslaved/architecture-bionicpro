@@ -12,7 +12,11 @@ services:
     ports:
       - "5433:5432"
   keycloak:
-    image: quay.io/keycloak/keycloak:21.1
+    # Кастомный образ: базовый Keycloak 21.1.1 + нативный провайдер «Яндекс»
+    # (OAuth 2.0, без принудительного scope openid). См. keycloak/Dockerfile.
+    build:
+      context: ./keycloak
+      dockerfile: Dockerfile
     environment:
       KEYCLOAK_ADMIN: admin
       KEYCLOAK_ADMIN_PASSWORD: admin

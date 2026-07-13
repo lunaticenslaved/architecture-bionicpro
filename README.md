@@ -26,13 +26,35 @@ cp .env.example .env
 #   (со страницы приложения на https://oauth.yandex.ru).
 #   Redirect URI приложения Яндекса:
 #   http://localhost:8080/realms/reports-realm/broker/yandex/endpoint
+#   docker compose подставит эти значения в realm-export.json (${YANDEX_CLIENT_ID})
+#   при импорте realm. Файл .env в .gitignore и в репозиторий не попадает.
 
-# Поднять всё окружение
+# Поднять всё окружение (Keycloak собирается из keycloak/Dockerfile —
+# базовый образ + нативный провайдер «Яндекс»)
 docker compose up -d --build
 
 # Убедиться, что все контейнеры запустились
 docker compose ps
 ```
+
+> **Почему кастомный образ Keycloak?**
+> Яндекс ID — это OAuth 2.0, а не OpenID Connect. Встроенный generic-провайдер
+> типа `oidc` по спецификации OIDC принудительно добавляет scope `openid`, на
+> который Яндекс отвечает ошибкой `invalid_scope`; отключить это в настройках
+> нельзя. Поэтому мы ставим расширение
+> [`playa-ru/keycloak-russian-providers`](https://github.com/playa-ru/keycloak-russian-providers),
+> дающее нативный тип провайдера `yandex` на чистом OAuth2 (без `openid`).
+> Сборка — в [`keycloak/Dockerfile`](keycloak/Dockerfile:1).
+
+> ⚠️ Если Keycloak уже запускался — realm уже в БД, и правки
+> [`keycloak/realm-export.json`](keycloak/realm-export.json:1) при обычном
+> рестарте **не применяются** (`--import-realm` пропускает существующий realm).
+> Полный переимпорт:
+> ```bash
+> docker compose down -v
+> sudo rm -rf ./postgres-keycloak-data
+> docker compose up -d --build
+> ```
 
 Дождаться, пока Keycloak импортирует realm:
 
