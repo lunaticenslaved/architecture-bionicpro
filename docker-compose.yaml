@@ -87,6 +87,12 @@ services:
       - crm_db_data:/var/lib/postgresql/data
     ports:
       - "5434:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U crm_user -d crm_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
 
   # CRM API — владелец клиентских данных. Сюда сохраняется профиль
   # пользователя из Яндекса и журнал согласий. Auth Proxy ходит только сюда,
@@ -102,7 +108,8 @@ services:
       KEYCLOAK_URL: http://keycloak:8080
       KEYCLOAK_REALM: reports-realm
     depends_on:
-      - crm_db
+      crm_db:
+        condition: service_healthy
 
   bionicpro-auth:
     build:

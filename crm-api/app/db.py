@@ -7,6 +7,7 @@ CRM — система-источник истины по клиентам Bioni
 
 Данные лежат в отдельной схеме `crm`. asyncpg-пул, схема создаётся при старте.
 """
+import asyncio
 import json
 from typing import Optional
 
@@ -49,10 +50,21 @@ class Database:
     def __init__(self) -> None:
         self._pool: Optional[asyncpg.Pool] = None
 
-    async def connect(self) -> None:
-        self._pool = await asyncpg.create_pool(
-            dsn=settings.DATABASE_URL, min_size=1, max_size=5
-        )
+    async def connect(self, *, max_attempts: int = 10, retry_delay: float = 2.0) -> None:
+        last_exc: Exception = RuntimeError("connect() never attempted")
+        for attempt in range(1, max_attempts + 1):
+            try:
+                self._pool = await asyncpg.create_pool(
+                    dsn=settings.DATABASE_URL, min_size=1, max_size=5
+                )
+                break
+            except Exception as exc:
+                last_exc = exc
+                if attempt < max_attempts:
+                    await asyncio.sleep(retry_delay)
+        else:
+            raise last_exc
+
         async with self._pool.acquire() as conn:
             await conn.execute(_SCHEMA)
 
