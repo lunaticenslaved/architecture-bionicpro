@@ -187,20 +187,6 @@
               "access.token.claim": "true",
               "userinfo.token.claim": "false"
             }
-          },
-          {
-            "name": "username-from-attribute",
-            "protocol": "openid-connect",
-            "protocolMapper": "oidc-usermodel-attribute-mapper",
-            "consentRequired": false,
-            "config": {
-              "user.attribute": "username",
-              "claim.name": "preferred_username",
-              "jsonType.label": "String",
-              "id.token.claim": "true",
-              "access.token.claim": "true",
-              "userinfo.token.claim": "true"
-            }
           }
         ]
       }
@@ -319,50 +305,14 @@
         "config": {
           "clientId": "${YANDEX_CLIENT_ID}",
           "clientSecret": "${YANDEX_CLIENT_SECRET}",
-          "syncMode": "IMPORT"
+          "syncMode": "IMPORT",
+          "userNameClaim": "login",
+          "emailClaim": "default_email",
+          "givenNameClaim": "first_name",
+          "familyNameClaim": "last_name",
+          "fullNameClaim": "display_name"
         }
       }
     ],
-    "identityProviderMappers": [
-      {
-        "name": "yandex-email",
-        "identityProviderAlias": "yandex",
-        "identityProviderMapper": "oidc-user-attribute-idp-mapper",
-        "config": {
-          "syncMode": "INHERIT",
-          "claim": "default_email",
-          "user.attribute": "email"
-        }
-      },
-      {
-        "name": "yandex-first-name",
-        "identityProviderAlias": "yandex",
-        "identityProviderMapper": "oidc-user-attribute-idp-mapper",
-        "config": {
-          "syncMode": "INHERIT",
-          "claim": "first_name",
-          "user.attribute": "firstName"
-        }
-      },
-      {
-        "name": "yandex-last-name",
-        "identityProviderAlias": "yandex",
-        "identityProviderMapper": "oidc-user-attribute-idp-mapper",
-        "config": {
-          "syncMode": "INHERIT",
-          "claim": "last_name",
-          "user.attribute": "lastName"
-        }
-      },
-      {
-        "name": "yandex-username",
-        "identityProviderAlias": "yandex",
-        "identityProviderMapper": "oidc-user-attribute-idp-mapper",
-        "config": {
-          "syncMode": "INHERIT",
-          "claim": "login",
-          "user.attribute": "username"
-        }
-      }
-    ]
+    "identityProviderMappers": []
   }
