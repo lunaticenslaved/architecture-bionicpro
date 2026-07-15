@@ -105,8 +105,7 @@ async def get_broker_token(access_token: str, alias: str) -> Optional[str]:
         resp = await client.get(
             url, headers={"Authorization": f"Bearer {access_token}"}
         )
-        if resp.status_code != 200:
-            return None
+        resp.raise_for_status()
         # Ответ может быть form-encoded или JSON в зависимости от версии.
         ctype = resp.headers.get("content-type", "")
         if "application/json" in ctype:

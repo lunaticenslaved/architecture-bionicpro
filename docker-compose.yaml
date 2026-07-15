@@ -26,6 +26,13 @@ services:
       KC_DB_PASSWORD: keycloak_password
       YANDEX_CLIENT_ID: ${YANDEX_CLIENT_ID:-}
       YANDEX_CLIENT_SECRET: ${YANDEX_CLIENT_SECRET:-}
+      # Фиксируем единственный канонический issuer для всех токенов.
+      # Без этого Keycloak в start-dev режиме проставляет iss на основе
+      # входящего Host-заголовка: браузер даёт localhost:8080, а внутренние
+      # вызовы bionicpro-auth идут через keycloak:8080 — разные iss → 401
+      # на /broker/yandex/token при валидации Bearer-токена.
+      KC_HOSTNAME_URL: http://localhost:8080
+      KC_HOSTNAME_STRICT: "false"
     command:
       - start-dev
       - --import-realm
