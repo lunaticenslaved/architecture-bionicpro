@@ -126,6 +126,19 @@ _OLAP_DDL = [
     PARTITION BY toYYYYMM(event_date)
     ORDER BY (subject, prosthesis_serial, event_date)
     """,
+    # Водяной знак ETL: до какого момента данные гарантированно обработаны.
+    # Reports API читает его, чтобы не отдавать отчёт за период,
+    # который Airflow ещё не загрузил в витрину.
+    """
+    CREATE TABLE IF NOT EXISTS olap.etl_watermark
+    (
+        process_name     String,    -- 'user_prosthesis_report_mart'
+        processed_up_to  DateTime,  -- верхняя граница обработанного периода
+        updated_at       DateTime DEFAULT now()
+    )
+    ENGINE = ReplacingMergeTree(updated_at)
+    ORDER BY process_name
+    """,
 ]
 
 
@@ -307,12 +320,23 @@ def build_report_mart(**context) -> None:
     )
     client.command("OPTIMIZE TABLE olap.user_prosthesis_report_mart FINAL")
 
+    # Фиксируем водяной знак: витрина консистентна до logical_date.
+    # Reports API не отдаёт данные за период после этой отметки.
+    client.command(
+        """
+        INSERT INTO olap.etl_watermark (process_name, processed_up_to)
+        VALUES ('user_prosthesis_report_mart', {watermark:DateTime})
+        """,
+        parameters={"watermark": logical_date.replace(tzinfo=None)},
+    )
+    client.command("OPTIMIZE TABLE olap.etl_watermark FINAL")
+
     total = client.command(
         "SELECT count() FROM olap.user_prosthesis_report_mart FINAL"
     )
     log.info(
-        "Report mart rebuilt for window [%s .. %s), total rows: %s",
-        date_from, date_to, total,
+        "Report mart rebuilt for window [%s .. %s), watermark=%s, total rows: %s",
+        date_from, date_to, logical_date, total,
     )
 
 

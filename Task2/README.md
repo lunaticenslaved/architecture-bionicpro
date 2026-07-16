@@ -1,4 +1,4 @@
-# Задание 2. Airflow DAG: ETL из CRM в OLAP и витрина для сервиса отчётов
+# Airflow DAG: ETL из CRM в OLAP и витрина для сервиса отчётов
 
 ## Задача
 
@@ -206,3 +206,129 @@ docker exec bionicpro-clickhouse clickhouse-client \
 запуск проходит успешно (4 задачи), в `olap.dim_user` — 3 клиента из CRM,
 в витрине — дневные агрегаты телеметрии по каждому клиенту, запрос по
 конкретному `subject` возвращает только его строки.
+
+
+# Reports API — бэкенд генерации отчётов из OLAP
+
+## Задача
+
+Создать бэкенд-часть приложения для API. Добавить API `/reports` для передачи
+отчётов, который возвращает **подготовленный** отчёт по заданному пользователю.
+Отчёт запрашивается из OLAP-базы **без сложных вычислений в реальном времени**.
+
+Требования безопасности:
+
+- отчёт не генерируется неаутентифицированному пользователю;
+- авторизованный пользователь получает **только собственный** отчёт;
+- отчёты строятся только за период, **уже обработанный Airflow** (пользователь
+  может запросить данные, которых ещё нет в OLAP).
+
+## Решение
+
+Новый сервис [`reports-api`](../reports-api/) — Python (FastAPI), контейнер
+`reports-api:8080` (наружу — `localhost:8091`). Это тот самый upstream,
+на который Auth Proxy уже проксирует `/api/*`
+(`UPSTREAM_API_URL: http://reports-api:8080`).
+
+```mermaid
+sequenceDiagram
+    participant B as Браузер (React)
+    participant P as Auth Proxy (BFF)
+    participant R as Reports API
+    participant CH as OLAP ClickHouse
+
+    B->>P: GET /api/reports (cookie session_id)
+    P->>P: сессия → access_token (Redis), ротация session_id
+    P->>R: GET /reports (Authorization: Bearer JWT)
+    R->>R: JWKS-валидация JWT (подпись RS256, exp, iss)
+    R->>R: RBAC: роль prothetic_user
+    R->>CH: SELECT max(processed_up_to) FROM olap.etl_watermark
+    alt витрина ещё не готова (Airflow не отработал)
+        R-->>B: 409 "Report data is not ready yet"
+    else данные готовы
+        R->>CH: SELECT ... FROM user_prosthesis_report_mart WHERE subject = {sub из JWT}
+        CH-->>R: готовые агрегаты (без вычислений на лету)
+        R-->>B: CSV / JSON (заголовок X-Report-Processed-Up-To)
+    end
+```
+
+### `GET /reports`
+
+| Параметр | По умолчанию | Описание |
+|---|---|---|
+| `days` | 30 | период отчёта (1–365 дней) |
+| `format` | `csv` | `csv` (файл-attachment) или `json` |
+| `subject` | — | только для роли `administrator`: отчёт другого пользователя (поддержка клиентов) |
+
+Ответы: `200` (отчёт), `401` (нет/просрочен токен), `403` (нет роли или чужой
+`subject`), `409` (ETL ещё не подготовил витрину), `503` (OLAP недоступен).
+
+### Как выполняются требования
+
+**1. Без вычислений в реальном времени.** Сервис читает готовые строки витрины
+`olap.user_prosthesis_report_mart` (дневные агрегаты, подготовленные DAG-ом
+`crm_to_olap_etl` из Задания 2). Запрос — точечная выборка по первичному ключу
+витрины `ORDER BY (subject, prosthesis_serial, event_date)`: ClickHouse читает
+только гранулы конкретного пользователя. Никаких `GROUP BY` по сырой
+телеметрии в момент запроса.
+
+**2. Только аутентифицированные.** Запросы приходят через Auth Proxy, который
+подставляет Bearer JWT из серверной сессии (браузер токенов не видит).
+Reports API — resource server: проверяет подпись RS256 по JWKS Keycloak,
+`exp` и `iss` ([`reports-api/app/auth.py`](../reports-api/app/auth.py)).
+Без валидного токена — `401`.
+
+**3. Только собственный отчёт.** Идентификатор пользователя **не принимается
+из запроса** — берётся claim `sub` из проверенного JWT. RBAC: нужна
+realm-роль `prothetic_user`. Попытка запросить `?subject=<чужой>` без роли
+`administrator` → `403`. Администратор может смотреть отчёты пользователей
+(поддержка клиентов) — это отдельная привилегированная роль.
+
+**4. Только обработанный Airflow период.** DAG после успешной сборки витрины
+записывает **водяной знак** в `olap.etl_watermark` (`processed_up_to` =
+логическая дата запуска). Reports API:
+- если водяного знака нет (ETL ещё ни разу не отработал) → `409`,
+  фронтенд показывает «Отчёт ещё не готов, попробуйте позже»;
+- иначе верхняя граница отчёта прижимается к водяному знаку:
+  `date_to = min(today, watermark)` — данные, которых ещё нет в OLAP,
+  в отчёт не попадают (не отдаём неполный «сегодняшний» срез);
+- фактическая актуальность отдаётся клиенту в заголовке
+  `X-Report-Processed-Up-To` (и в поле `processed_up_to` для JSON).
+
+### UI
+
+Кнопка **Download Report** уже есть в
+[`frontend/src/components/ReportPage.tsx`](../frontend/src/components/ReportPage.tsx):
+вызывает `GET /api/reports` через Auth Proxy (только `credentials: 'include'`,
+без токенов в JS) и скачивает CSV. Добавлена обработка:
+- `401` → сброс сессии, предложение войти заново;
+- `403` → «отчёты доступны только пользователям протезов и только свои»;
+- `409` → «данные ещё обрабатываются (ETL), попробуйте позже».
+
+## Как проверить
+
+```bash
+docker-compose up -d --build
+# дождаться Keycloak (импорт realm) и Airflow (см. Task2/README.md)
+
+# 1. Прогнать ETL, чтобы появился водяной знак и данные витрины
+docker exec bionicpro-airflow-scheduler airflow dags unpause crm_to_olap_etl
+docker exec bionicpro-airflow-scheduler airflow dags trigger crm_to_olap_etl
+
+# 2. Без токена — 401
+curl -i http://localhost:8091/reports
+
+# 3. Через UI: http://localhost:3000 → Login (prothetic1/prothetic123 + OTP)
+#    → Download Report → скачивается prosthesis-report-*.csv
+#    (если DAG ещё не отработал — сообщение «Отчёт ещё не готов»)
+
+# 4. Пользователь БЕЗ роли prothetic_user (user1/password123) → 403
+
+# 5. Убедиться, что данные фильтруются по sub:
+#    в CSV — только протезы текущего пользователя
+```
+
+> Демо-данные: сиды CRM/телеметрии используют фиксированные `subject`
+> (`1111…`, `2222…`, `3333…`). Чтобы увидеть непустой отчёт под реальным
+> пользователем Keycloak, добавьте телеметрию с его `sub` (см. Task2/README.md)
+> и перезапустите DAG — либо проверяйте выборку напрямую запросом к витрине.

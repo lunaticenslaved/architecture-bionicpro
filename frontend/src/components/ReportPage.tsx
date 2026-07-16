@@ -92,6 +92,8 @@ const ReportPage: React.FC = () => {
 
       // Запрос идёт через прокси bionicpro-auth. Никаких токенов в заголовках:
       // сервис сам подставит Bearer access_token из серверной сессии.
+      // Reports API вернёт отчёт ТОЛЬКО по текущему пользователю (sub из JWT)
+      // и только за период, уже обработанный Airflow (ETL watermark).
       const response = await fetch(`${AUTH_URL}/api/reports`, {
         credentials: 'include'
       });
@@ -99,6 +101,21 @@ const ReportPage: React.FC = () => {
       if (response.status === 401) {
         setUser(null);
         setError('Session expired. Please log in again.');
+        return;
+      }
+      if (response.status === 403) {
+        setError(
+          'Доступ запрещён: отчёты доступны только пользователям протезов ' +
+          '(роль prothetic_user) и только по собственным данным.'
+        );
+        return;
+      }
+      if (response.status === 409) {
+        // ETL (Airflow) ещё не подготовил витрину — данных пока нет в OLAP.
+        setError(
+          'Отчёт ещё не готов: данные обрабатываются (ETL). ' +
+          'Попробуйте позже.'
+        );
         return;
       }
       if (!response.ok) {
