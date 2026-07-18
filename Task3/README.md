@@ -110,7 +110,7 @@ DELETE /reports/cache?subject={sub}
 
 | Сервис | Порт | Описание |
 |--------|------|----------|
-| `minio` | 9000 (API), 9001 (Console) | S3-совместимое объектное хранилище |
+| `minio` | 9002 (API), 9003 (Console) | S3-совместимое объектное хранилище |
 | `nginx-cdn` | 8083 | Reverse proxy с кэшированием |
 
 ### Доступ к Minio Console
