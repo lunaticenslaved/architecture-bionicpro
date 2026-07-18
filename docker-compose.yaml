@@ -43,6 +43,12 @@ services:
     depends_on:
       - keycloak_db
       - openldap
+    healthcheck:
+      test: ["CMD-SHELL", "timeout 3 bash -c 'exec 3<>/dev/tcp/localhost/8080'" ]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 20s
 
   # LDAP-сервер представительства BionicPRO в другой стране.
   # Данные пользователей и ролей хранятся локально (data residency),
@@ -155,32 +161,46 @@ services:
         condition: service_healthy
 
   minio:
-    image: minio/minio:RELEASE.2024-01-28T22-35-53Z
     container_name: bionicpro-minio
+    build:
+      context: ./minio
+      dockerfile: Dockerfile
     ports:
       - "9002:9000"   # S3 API (избегаем конфликта с ClickHouse:9000)
       - "9003:9001"   # Minio Console
+    # volumes:
+    #  - minio_storage:/data
     environment:
       MINIO_ROOT_USER: minioadmin
       MINIO_ROOT_PASSWORD: minioadmin
-    command: server /data --console-address ":9001"
-    volumes:
-      - minio_data:/data
+      # Временно отключаем OIDC для тестирования базовой функциональности
+      # MINIO_IDENTITY_OPENID_CLAIM_NAME: "policy"
+    depends_on:
+      keycloak:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
 
-  nginx-cdn:
-    image: nginx:alpine
-    container_name: bionicpro-nginx-cdn
+  minio-nginx:
+    container_name: minio-nginx
+    build:
+      context: ./minio-nginx 
+      dockerfile: Dockerfile
+    depends_on:
+      minio:
+        condition: service_healthy  # Ждём готовности MinIO
     ports:
       - "8083:8083"
-    volumes:
-      - ./nginx-cdn.conf:/etc/nginx/conf.d/default.conf:ro
-    depends_on:
-      - minio
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f 'nginx: master process' || exit 1"]  # Проверка, что nginx процесс запущен
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
 
   bionicpro-auth:
     build:

@@ -123,8 +123,8 @@ http://localhost:9001 (логин: `minioadmin`, пароль: `minioadmin`)
 docker-compose up -d minio nginx-cdn reports-api bionicpro-auth
 
 # 2. Проверить health endpoints
-curl http://localhost:9083/health        # Nginx CDN
-curl http://localhost:9000/minio/health/live  # Minio
+curl http://localhost:8083/health        # Nginx CDN
+curl http://localhost:9003/minio/health/live  # Minio
 
 # 3. Запросить отчёт (первый раз — генерация + запись в S3)
 curl -v -b session=... http://localhost:8000/api/reports
