@@ -22,13 +22,13 @@ done
 echo "Настройка MinIO Client..."
 mc alias set local http://localhost:9000 ${MINIO_ROOT_USER} ${MINIO_ROOT_PASSWORD}
 
-echo "Создание бакета reports..."
-mc mb local/reports --ignore-existing
+echo "Создание бакета bionicpro-reports..."
+mc mb local/bionicpro-reports --ignore-existing
 
-echo "Настройка публичного доступа к бакету reports..."
-mc anonymous set download local/reports
+echo "Настройка публичного доступа к бакету bionicpro-reports..."
+mc anonymous set download local/bionicpro-reports
 
-echo "Настройка TTL (7 дней) для бакета reports..."
+echo "Настройка TTL (7 дней) для бакета bionicpro-reports..."
 cat > /tmp/lifecycle-reports.json <<EOF
 {
   "Rules": [
@@ -43,7 +43,7 @@ cat > /tmp/lifecycle-reports.json <<EOF
 }
 EOF
 
-mc ilm import local/reports < /tmp/lifecycle-reports.json
+mc ilm import local/bionicpro-reports < /tmp/lifecycle-reports.json
 echo "✓ TTL настроен: файлы старше 7 дней будут автоматически удаляться"
 
 echo "MinIO инициализация завершена"

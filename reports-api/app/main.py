@@ -100,9 +100,21 @@ def _report_key(subject: str, date_from: date, date_to: date, fmt: str) -> str:
     return f"{subject}/{date_from}_{date_to}.{fmt}"
 
 
-def _cdn_url(key: str) -> str:
-    """Формирует публичный URL отчёта через CDN (Nginx reverse proxy)."""
-    return f"{settings.CDN_URL_PREFIX}/{key}"
+def _presigned_url(key: str, expiration: int = 3600) -> str:
+    """Генерирует presigned URL для безопасного доступа к отчёту в S3.
+
+    URL действителен ограниченное время (по умолчанию 1 час) и содержит
+    криптографическую подпись, поэтому бакет может оставаться приватным.
+    """
+    s3 = _s3_client()
+    return s3.generate_presigned_url(
+        "get_object",
+        Params={
+            "Bucket": settings.S3_BUCKET_NAME,
+            "Key": key,
+        },
+        ExpiresIn=expiration,
+    )
 
 
 def _report_exists_in_s3(subject: str, date_from: date, date_to: date, fmt: str) -> bool:
@@ -133,7 +145,7 @@ def _upload_report_to_s3(
         CacheControl="max-age=3600, public",  # Кэш в CDN на 1 час
     )
     logger.info("Uploaded report to S3: %s", key)
-    return _cdn_url(key)
+    return _presigned_url(key)
 
 
 def _delete_report_from_s3(
@@ -277,13 +289,13 @@ async def get_report(
     #  Проверяем наличие отчёта в S3 — если есть, редиректим на CDN
     # --------------------------------------------------------------- #
     if _report_exists_in_s3(target_subject, date_from, date_to, format):
-        cdn = _cdn_url(_report_key(target_subject, date_from, date_to, format))
-        logger.info("Serving cached report from CDN: %s", cdn)
+        url = _presigned_url(_report_key(target_subject, date_from, date_to, format))
+        logger.info("Serving cached report via presigned URL: %s", url)
         return RedirectResponse(
-            url=cdn,
+            url=url,
             status_code=302,
             headers={
-                "X-Report-Source": "cdn",
+                "X-Report-Source": "s3-presigned",
                 "X-Report-Processed-Up-To": watermark.isoformat(),
             },
         )
@@ -311,9 +323,9 @@ async def get_report(
             "total_rows": len(rows),
         }
         content = __import__("json").dumps(report_data, ensure_ascii=False, indent=2).encode("utf-8")
-        cdn = _upload_report_to_s3(target_subject, date_from, date_to, format, content)
+        url = _upload_report_to_s3(target_subject, date_from, date_to, format, content)
         return RedirectResponse(
-            url=cdn,
+            url=url,
             status_code=302,
             headers={
                 "X-Report-Source": "s3",
@@ -323,9 +335,9 @@ async def get_report(
 
     # CSV формат
     csv_content = _to_csv(rows).encode("utf-8")
-    cdn = _upload_report_to_s3(target_subject, date_from, date_to, format, csv_content)
+    url = _upload_report_to_s3(target_subject, date_from, date_to, format, csv_content)
     return RedirectResponse(
-        url=cdn,
+        url=url,
         status_code=302,
         headers={
             "X-Report-Source": "s3",
