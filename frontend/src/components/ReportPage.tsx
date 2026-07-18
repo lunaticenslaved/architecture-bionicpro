@@ -12,6 +12,7 @@ interface UserInfo {
 }
 
 interface ReportData {
+  source: "cache" | "generated";
   subject: string;
   username: string;
   period: { from: string; to: string };
@@ -260,6 +261,9 @@ const ReportPage: React.FC = () => {
             <h2 className="text-xl font-bold mb-2">Отчёт о работе протеза</h2>
             <p className="text-gray-600 mb-1">
               Период: {report.period.from} — {report.period.to} ({report.days} дней)
+            </p>
+            <p className="text-gray-600 mb-4">
+              Источник: {report.source}
             </p>
             <p className="text-gray-600 mb-1">
               Данные актуальны на: {report.processed_up_to}

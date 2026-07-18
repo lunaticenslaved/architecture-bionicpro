@@ -263,6 +263,7 @@ async def get_report(
     if _report_exists_in_s3(target_subject, date_from, date_to, fmt):
         cached_content = _read_report_from_s3(target_subject, date_from, date_to, fmt)
         report_data = json.loads(cached_content.decode("utf-8"))
+        report_data["source"] = "cache"
         logger.info("Serving cached report from S3 for subject=%s", target_subject)
         return JSONResponse(
             report_data,
@@ -283,6 +284,7 @@ async def get_report(
     report_data = {
         "subject": target_subject,
         "username": user.username,
+        "source": "generated",
         "period": {"from": str(date_from), "to": str(date_to)},
         "days": days,
         "processed_up_to": watermark.isoformat(),
