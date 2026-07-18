@@ -45,6 +45,7 @@ const ReportPage: React.FC = () => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [report, setReport] = useState<ReportData | null>(null);
+  const [subjectId, setSubjectId] = useState<string>('');
 
   // Загружает информацию о пользователе (в т.ч. флаг needs_consent).
   const loadUser = async () => {
@@ -122,9 +123,12 @@ const ReportPage: React.FC = () => {
 
       // Запрос идёт через прокси bionicpro-auth. Никаких токенов в заголовках:
       // сервис сам подставит Bearer access_token из серверной сессии.
-      // Reports API вернёт отчёт ТОЛЬКО по текущему пользователю (sub из JWT)
-      // и только за период, уже обработанный Airflow (ETL watermark).
-      const response = await fetch(`${AUTH_URL}/api/reports`, {
+      // Если указан subjectId, передаём его как ?subject= для администратора.
+      let url = `${AUTH_URL}/api/reports`;
+      if (subjectId.trim()) {
+        url += `?subject=${encodeURIComponent(subjectId.trim())}`;
+      }
+      const response = await fetch(url, {
         credentials: 'include'
       });
 
@@ -134,16 +138,23 @@ const ReportPage: React.FC = () => {
         return;
       }
       if (response.status === 403) {
-        setError(
-          'Доступ запрещён: отчёты доступны только пользователям протезов ' +
-          '(роль prothetic_user) и только по собственным данным.'
-        );
+        // Пробуем прочитать тело ответа — Reports API может вернуть детали.
+        let detail = 'Доступ запрещён: у вас нет прав на просмотр отчёта этого пользователя.';
+        try {
+          const body = await response.json();
+          if (body.detail) {
+            detail = body.detail;
+          }
+        } catch {
+          // тело не читается, используем сообщение по умолчанию
+        }
+        setError(detail);
         return;
       }
       if (response.status === 409) {
-        // ETL (Airflow) ещё не подготовил витрину — данных пока нет в OLAP.
+        // CDC-поток ещё не доставил данные — витрина пуста.
         setError(
-          'Отчёт ещё не готов: данные обрабатываются (ETL). ' +
+          'Отчёт ещё не готов: данные обрабатываются (CDC). ' +
           'Попробуйте позже.'
         );
         return;
@@ -239,6 +250,21 @@ const ReportPage: React.FC = () => {
           Signed in as {user.username}
           {user.identity_provider === 'yandex' && ' (через Яндекс ID)'}
         </p>
+
+        {/* Поле ввода subject ID — показывается всем, но ?subject= работает
+            только для администратора (обычный пользователь получит 403). */}
+        <div className="mb-4">
+          <label className="block text-sm font-medium text-gray-700 mb-1">
+            Subject ID (для администратора)
+          </label>
+          <input
+            type="text"
+            value={subjectId}
+            onChange={(e) => setSubjectId(e.target.value)}
+            placeholder="UUID пользователя (например, 11111111-...)"
+            className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 text-sm"
+          />
+        </div>
 
         <button
           onClick={loadReport}
