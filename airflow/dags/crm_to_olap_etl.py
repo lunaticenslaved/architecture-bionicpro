@@ -1,5 +1,9 @@
 """BionicPRO — ETL: CRM (PostgreSQL) → OLAP (ClickHouse) + витрина отчётов.
 
+⚠️ DAG ОСТАНОВЛЕН (paused) — начиная с Task 4 CRM-данные доставляются
+потоково через CDC (Debezium → Kafka → ClickHouse). Batch-выгрузка
+больше не нужна. DAG сохранён для истории и обратной совместимости.
+
 Задача (Task 2):
 1. Извлечь данные о клиентах и их протезах из CRM-системы (PostgreSQL).
 2. Загрузить их в OLAP-базу (ClickHouse, БД `olap`).

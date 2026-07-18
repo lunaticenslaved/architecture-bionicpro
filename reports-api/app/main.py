@@ -1,11 +1,10 @@
 """Reports API — сервис отчётов о работе протезов.
 
 GET /reports возвращает подготовленный отчёт по пользователю из витрины
-`olap.user_prosthesis_report_mart` (ClickHouse). Витрину заранее готовит
-Airflow DAG `crm_to_olap_etl`: телеметрия уже агрегирована по дням
-в разрезе (клиент, протез) и обогащена данными CRM — сервису не нужны
-сложные вычисления в реальном времени, только выборка готовых строк
-по первичному ключу (subject, ...).
+`olap.user_prosthesis_report_mart_v2` (ClickHouse). Витрина наполняется
+потоково через CDC (Debezium → Kafka → ClickHouse) — данные CRM
+доставляются в реальном времени без массовых SELECT из PostgreSQL.
+Агрегаты телеметрии обновляются через MaterializedView.
 
 Безопасность:
 - запросы приходят через Auth Proxy (BFF) с Bearer JWT из серверной сессии;
@@ -16,10 +15,6 @@ Airflow DAG `crm_to_olap_etl`: телеметрия уже агрегирова�
   (administrator может указать ?subject= для поддержки клиентов).
 
 Кэширование отчётов в S3:
-- При запросе отчёта сервис сначала проверяет наличие отчёта в S3.
-  Если он там есть, то отдаёт HTTP 302 редирект на CDN.
-- Если отчёт не обнаружен, сервис его генерирует, кладёт в S3 и отдаёт
-  ссылку на CDN в ответе.
 - Структура хранения в S3: {bucket}/{subject}/{date_from}_{date_to}.{format}
   для быстрого доступа по пользователю и периоду.
 - Инвалидация кеша: DELETE /reports/cache?subject=&date_from=&date_to=
@@ -41,11 +36,9 @@ from .config import settings
 
 logger = logging.getLogger(__name__)
 
-_WATERMARK_PROCESS = "user_prosthesis_report_mart"
-
 app = FastAPI(title="BionicPRO Reports API")
 
-# Колонки отчёта — соответствуют витрине olap.user_prosthesis_report_mart.
+# Колонки отчёта — соответствуют витрине olap.user_prosthesis_report_mart_v2.
 _REPORT_COLUMNS = [
     "event_date",
     "prosthesis_serial",
@@ -164,18 +157,17 @@ def _ch_client():
 
 
 def _fetch_watermark(client) -> Optional[datetime]:
-    """До какого момента данные обработаны Airflow (olap.etl_watermark).
+    """Свежесть данных CDC-потока: максимальный last_event_at из агрегата.
 
-    Пользователь может запросить данные, которых ещё нет в OLAP, —
-    отчёт строится только за период, закрытый ETL-процессом.
+    CDC-поток доставляет изменения почти в реальном времени —
+    водяной знак определяется по последнему событию телеметрии
+    в агрегате, а не по Airflow-маркеру.
     """
     result = client.query(
         """
-        SELECT max(processed_up_to)
-        FROM olap.etl_watermark FINAL
-        WHERE process_name = {p:String}
+        SELECT maxMerge(last_event_at)
+        FROM olap.telemetry_daily_agg
         """,
-        parameters={"p": _WATERMARK_PROCESS},
     )
     rows = result.result_rows
     if not rows or rows[0][0] is None:
@@ -185,17 +177,17 @@ def _fetch_watermark(client) -> Optional[datetime]:
     return wm if wm.year > 1970 else None
 
 
-def _fetch_report_rows(client, subject: str, date_from: date, date_to: date) -> list[dict]:
-    """Выборка готовых строк витрины по пользователю.
 
-    Витрина ORDER BY (subject, prosthesis_serial, event_date) — запрос
-    по конкретному subject читает только его гранулы, БЕЗ агрегаций
-    в реальном времени. FINAL схлопывает версии ReplacingMergeTree.
+def _fetch_report_rows(client, subject: str, date_from: date, date_to: date) -> list[dict]:
+    """Выборка готовых строк витрины v2 по пользователю.
+
+    Витрина olap.user_prosthesis_report_mart_v2 — это VIEW,
+    уже финализированный (содержит -Merge функции). FINAL не требуется.
     """
     result = client.query(
         f"""
         SELECT {", ".join(_REPORT_COLUMNS)}
-        FROM olap.user_prosthesis_report_mart FINAL
+        FROM olap.user_prosthesis_report_mart_v2
         WHERE subject = {{subject:String}}
           AND event_date >= {{date_from:Date}}
           AND event_date <= {{date_to:Date}}
@@ -208,7 +200,6 @@ def _fetch_report_rows(client, subject: str, date_from: date, date_to: date) -> 
         },
     )
     return [dict(zip(result.column_names, row)) for row in result.result_rows]
-
 
 # --------------------------------------------------------------------------- #
 #  Endpoints
@@ -247,18 +238,20 @@ async def get_report(
     except Exception as exc:  # ClickHouse недоступен и т.п.
         raise HTTPException(status_code=503, detail=f"OLAP unavailable: {exc}")
 
-    # Отчёт строится только за период, уже обработанный Airflow.
+    # Отчёт строится только за период, по которому есть данные в агрегате.
+    # CDC-поток доставляет изменения почти в реальном времени — водяной знак
+    # определяется по последнему событию телеметрии в olap.telemetry_daily_agg.
     if watermark is None:
         raise HTTPException(
             status_code=409,
             detail=(
-                "Report data is not ready yet: the ETL process (Airflow) "
-                "has not populated the OLAP mart. Try again later."
+                "Report data is not ready yet: the CDC pipeline has not "
+                "populated the OLAP mart. Try again later."
             ),
         )
 
-    # Верхнюю границу отчёта прижимаем к водяному знаку ETL: данные после
-    # него ещё не загружены в OLAP, отдавать их нельзя (будут неполными).
+    # Верхнюю границу отчёта прижимаем к водяному знаку: данные после
+    # последнего события телеметрии ещё не поступили.
     date_to = min(date.today(), watermark.date())
     date_from = date_to - timedelta(days=days)
 

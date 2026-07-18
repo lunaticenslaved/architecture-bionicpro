@@ -92,6 +92,7 @@ services:
   crm_db:
     image: postgres:14
     container_name: bionicpro-crm-db
+    command: ["postgres", "-c", "wal_level=logical"]
     environment:
       POSTGRES_DB: crm_db
       POSTGRES_USER: crm_user
@@ -109,6 +110,90 @@ services:
       timeout: 5s
       retries: 10
       start_period: 10s
+
+  # ------------------------------------------------------------------
+  # Task 4: CDC-контур (Debezium → Kafka → ClickHouse)
+  # ------------------------------------------------------------------
+
+  # Kafka (KRaft, один брокер). Без ZooKeeper — режим KRaft.
+  kafka:
+    image: bitnami/kafka:3.7
+    container_name: bionicpro-kafka
+    environment:
+      # Режим KRaft: один узел выполняет роли broker + controller.
+      KAFKA_CFG_NODE_ID: "1"
+      KAFKA_CFG_PROCESS_ROLES: broker,controller
+      KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: "1@kafka:9093"
+      KAFKA_CFG_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_CFG_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_CFG_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CFG_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      # Авто-создание топиков для Debezium (не требуется, но на случай отладки).
+      KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE: "true"
+      # Хранение данных.
+      KAFKA_KRAFT_CLUSTER_ID: "bionicpro-cdc-cluster"
+    volumes:
+      - kafka_data:/bitnami/kafka
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-topics.sh --bootstrap-server localhost:9092 --list || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  # Kafka Connect + Debezium — CDC-коннектор к PostgreSQL.
+  kafka-connect:
+    image: debezium/connect:2.7
+    container_name: bionicpro-kafka-connect
+    environment:
+      BOOTSTRAP_SERVERS: kafka:9092
+      GROUP_ID: "bionicpro-cdc"
+      CONFIG_STORAGE_TOPIC: "bionicpro-cdc-config"
+      OFFSET_STORAGE_TOPIC: "bionicpro-cdc-offset"
+      STATUS_STORAGE_TOPIC: "bionicpro-cdc-status"
+      # JSON-конвертеры без схем (schemas.enable=false) — плоский JSON для ClickHouse.
+      KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      KEY_CONVERTER_SCHEMAS_ENABLE: "false"
+      VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
+      # Логи.
+      LOG_LEVEL: INFO
+    ports:
+      - "8084:8083"   # REST API (8083 занят minio-nginx)
+    depends_on:
+      kafka:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8083/connectors || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+
+  # Одноразовая инициализация: регистрация Debezium-коннектора через REST API.
+  debezium-init:
+    image: curlimages/curl:8.6
+    container_name: bionicpro-debezium-init
+    depends_on:
+      kafka-connect:
+        condition: service_healthy
+    volumes:
+      - ./debezium/crm-connector.json:/crm-connector.json:ro
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        echo "Waiting for Kafka Connect to be ready..."
+        sleep 5
+        echo "Registering Debezium PostgreSQL connector..."
+        curl -f -X PUT -H "Content-Type: application/json" \
+          --data @/crm-connector.json \
+          http://kafka-connect:8083/connectors/crm-connector/config
+        echo ""
+        echo "Connector registered. Checking status..."
+        curl -f http://kafka-connect:8083/connectors/crm-connector/status
+        echo ""
 
   # CRM API — владелец клиентских данных. Сюда сохраняется профиль
   # пользователя из Яндекса и журнал согласий. Auth Proxy ходит только сюда,
@@ -276,6 +361,30 @@ services:
       retries: 20
       start_period: 10s
 
+  # Одноразовая инициализация CDC-схем ClickHouse (KafkaEngine, MV, VIEW).
+  # Выполняется после готовности Kafka и ClickHouse.
+  clickhouse-cdc-init:
+    image: clickhouse/clickhouse-server:24.3
+    container_name: bionicpro-clickhouse-cdc-init
+    entrypoint:
+      - /bin/bash
+      - -c
+      - |
+        echo "Waiting for ClickHouse to be ready..."
+        until wget -qO- http://clickhouse:8123/ping | grep -q Ok; do
+          sleep 2
+        done
+        echo "Applying CDC schema..."
+        clickhouse-client --host clickhouse --user etl_user --password etl_password --multiquery < /cdc-init.sql
+        echo "CDC schema applied successfully."
+    volumes:
+      - ./clickhouse/cdc/02_cdc_kafka_olap.sql:/cdc-init.sql:ro
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+
   # Метаданные Airflow.
   airflow_db:
     image: postgres:14
@@ -368,3 +477,4 @@ volumes:
   airflow_db_data:
   airflow_logs:
   minio_data:
+  kafka_data:
