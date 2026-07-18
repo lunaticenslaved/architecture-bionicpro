@@ -28,7 +28,7 @@ Airflow DAG `crm_to_olap_etl`: телеметрия уже агрегирова�
 import json
 import logging
 from datetime import date, datetime, timedelta
-from typing import Optional
+from typing import Literal, Optional
 
 import boto3
 import clickhouse_connect
@@ -210,14 +210,6 @@ def _fetch_report_rows(client, subject: str, date_from: date, date_to: date) -> 
     return [dict(zip(result.column_names, row)) for row in result.result_rows]
 
 
-def _to_csv(rows: list[dict]) -> str:
-    buf = io.StringIO()
-    writer = csv.DictWriter(buf, fieldnames=_REPORT_COLUMNS)
-    writer.writeheader()
-    writer.writerows(rows)
-    return buf.getvalue()
-
-
 # --------------------------------------------------------------------------- #
 #  Endpoints
 # --------------------------------------------------------------------------- #
@@ -277,7 +269,7 @@ async def get_report(
     # --------------------------------------------------------------- #
     if _report_exists_in_s3(target_subject, date_from, date_to, fmt):
         cached_content = _read_report_from_s3(target_subject, date_from, date_to, fmt)
-        report_data = __import__("json").loads(cached_content.decode("utf-8"))
+        report_data = json.loads(cached_content.decode("utf-8"))
         logger.info("Serving cached report from S3 for subject=%s", target_subject)
         return JSONResponse(
             report_data,
@@ -308,7 +300,7 @@ async def get_report(
         ],
         "total_rows": len(rows),
     }
-    content = __import__("json").dumps(report_data, ensure_ascii=False, indent=2).encode("utf-8")
+    content = json.dumps(report_data, ensure_ascii=False, indent=2).encode("utf-8")
     _upload_report_to_s3(target_subject, date_from, date_to, fmt, content)
     logger.info("Generated and cached report in S3 for subject=%s", target_subject)
     return JSONResponse(
