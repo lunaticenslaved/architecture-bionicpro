@@ -25,18 +25,16 @@ Airflow DAG `crm_to_olap_etl`: телеметрия уже агрегирова�
 - Инвалидация кеша: DELETE /reports/cache?subject=&date_from=&date_to=
   позволяет удалить устаревший отчёт из S3 и CDN purge через Cache-Control.
 """
-import csv
-import hashlib
-import io
+import json
 import logging
 from datetime import date, datetime, timedelta
-from typing import Literal, Optional
+from typing import Optional
 
 import boto3
 import clickhouse_connect
 from botocore.config import Config
 from fastapi import Depends, FastAPI, HTTPException, Query
-from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import JSONResponse
 
 from .auth import Principal, require_reports_access
 from .config import settings
@@ -100,21 +98,12 @@ def _report_key(subject: str, date_from: date, date_to: date, fmt: str) -> str:
     return f"{subject}/{date_from}_{date_to}.{fmt}"
 
 
-def _presigned_url(key: str, expiration: int = 3600) -> str:
-    """Генерирует presigned URL для безопасного доступа к отчёту в S3.
-
-    URL действителен ограниченное время (по умолчанию 1 час) и содержит
-    криптографическую подпись, поэтому бакет может оставаться приватным.
-    """
+def _read_report_from_s3(subject: str, date_from: date, date_to: date, fmt: str) -> bytes:
+    """Читает содержимое отчёта из S3."""
     s3 = _s3_client()
-    return s3.generate_presigned_url(
-        "get_object",
-        Params={
-            "Bucket": settings.S3_BUCKET_NAME,
-            "Key": key,
-        },
-        ExpiresIn=expiration,
-    )
+    key = _report_key(subject, date_from, date_to, fmt)
+    response = s3.get_object(Bucket=settings.S3_BUCKET_NAME, Key=key)
+    return response["Body"].read()
 
 
 def _report_exists_in_s3(subject: str, date_from: date, date_to: date, fmt: str) -> bool:
@@ -132,7 +121,7 @@ def _report_exists_in_s3(subject: str, date_from: date, date_to: date, fmt: str)
 
 def _upload_report_to_s3(
     subject: str, date_from: date, date_to: date, fmt: str, content: bytes
-) -> str:
+):
     """Записывает сформированный отчёт в S3 и возвращает CDN URL."""
     s3 = _s3_client()
     _ensure_bucket(s3)
@@ -145,7 +134,6 @@ def _upload_report_to_s3(
         CacheControl="max-age=3600, public",  # Кэш в CDN на 1 час
     )
     logger.info("Uploaded report to S3: %s", key)
-    return _presigned_url(key)
 
 
 def _delete_report_from_s3(
@@ -237,21 +225,18 @@ def _to_csv(rows: list[dict]) -> str:
 async def get_report(
     user: Principal = Depends(require_reports_access),
     days: int = Query(30, ge=1, le=365, description="Период отчёта, дней"),
-    format: Literal["csv", "json"] = Query(
-        "csv", description="Формат ответа: csv (файл) или json"
-    ),
     subject: Optional[str] = Query(
         None,
         description="Только для роли administrator: отчёт другого пользователя",
     ),
 ):
-    """Отчёт о работе протеза(-ов) текущего пользователя за период.
+    """Отчёт о работе протеза(-ов) текущего пользователя за период в формате JSON.
 
     Данные берутся из подготовленной витрины OLAP — без тяжёлых
     вычислений в реальном времени.
 
     Кэширование: если отчёт уже сформирован и лежит в S3,
-    сервис отдаёт HTTP 302 редирект на CDN.
+    сервис читает его из S3 и возвращает JSON.
     """
     # Пользователь может смотреть ТОЛЬКО свой отчёт: subject берём из JWT.
     # Явный параметр ?subject= разрешён только администратору.
@@ -285,64 +270,52 @@ async def get_report(
     date_to = min(date.today(), watermark.date())
     date_from = date_to - timedelta(days=days)
 
+    fmt = "json"  # Только JSON формат
+
     # --------------------------------------------------------------- #
-    #  Проверяем наличие отчёта в S3 — если есть, редиректим на CDN
+    #  Проверяем наличие отчёта в S3 — если есть, читаем и возвращаем
     # --------------------------------------------------------------- #
-    if _report_exists_in_s3(target_subject, date_from, date_to, format):
-        url = _presigned_url(_report_key(target_subject, date_from, date_to, format))
-        logger.info("Serving cached report via presigned URL: %s", url)
-        return RedirectResponse(
-            url=url,
-            status_code=302,
+    if _report_exists_in_s3(target_subject, date_from, date_to, fmt):
+        cached_content = _read_report_from_s3(target_subject, date_from, date_to, fmt)
+        report_data = __import__("json").loads(cached_content.decode("utf-8"))
+        logger.info("Serving cached report from S3 for subject=%s", target_subject)
+        return JSONResponse(
+            report_data,
             headers={
-                "X-Report-Source": "s3-presigned",
+                "X-Report-Source": "s3-cache",
                 "X-Report-Processed-Up-To": watermark.isoformat(),
             },
         )
 
     # --------------------------------------------------------------- #
-    #  Отчёта в S3 нет — генерируем, сохраняем в S3, редиректим на CDN
+    #  Отчёта в S3 нет — генерируем из ClickHouse, сохраняем в S3, возвращаем
     # --------------------------------------------------------------- #
     try:
         rows = _fetch_report_rows(client, target_subject, date_from, date_to)
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"OLAP unavailable: {exc}")
 
-    if format == "json":
-        report_data = {
-            "subject": target_subject,
-            "username": user.username,
-            "period": {"from": str(date_from), "to": str(date_to)},
-            "days": days,
-            "processed_up_to": watermark.isoformat(),
-            "rows": [
-                {k: (str(v) if not isinstance(v, (int, float)) else v)
-                 for k, v in r.items()}
-                for r in rows
-            ],
-            "total_rows": len(rows),
-        }
-        content = __import__("json").dumps(report_data, ensure_ascii=False, indent=2).encode("utf-8")
-        url = _upload_report_to_s3(target_subject, date_from, date_to, format, content)
-        return RedirectResponse(
-            url=url,
-            status_code=302,
-            headers={
-                "X-Report-Source": "s3",
-                "X-Report-Processed-Up-To": watermark.isoformat(),
-            },
-        )
-
-    # CSV формат
-    csv_content = _to_csv(rows).encode("utf-8")
-    url = _upload_report_to_s3(target_subject, date_from, date_to, format, csv_content)
-    return RedirectResponse(
-        url=url,
-        status_code=302,
+    report_data = {
+        "subject": target_subject,
+        "username": user.username,
+        "period": {"from": str(date_from), "to": str(date_to)},
+        "days": days,
+        "processed_up_to": watermark.isoformat(),
+        "rows": [
+            {k: (str(v) if not isinstance(v, (int, float)) else v)
+             for k, v in r.items()}
+             for r in rows
+        ],
+        "total_rows": len(rows),
+    }
+    content = __import__("json").dumps(report_data, ensure_ascii=False, indent=2).encode("utf-8")
+    _upload_report_to_s3(target_subject, date_from, date_to, fmt, content)
+    logger.info("Generated and cached report in S3 for subject=%s", target_subject)
+    return JSONResponse(
+        report_data,
         headers={
-            "X-Report-Source": "s3",
+            "X-Report-Source": "generated",
             "X-Report-Processed-Up-To": watermark.isoformat(),
-            "Content-Disposition": f'attachment; filename="prosthesis-report-{date_from}-{date_to}.csv"',
         },
     )
 

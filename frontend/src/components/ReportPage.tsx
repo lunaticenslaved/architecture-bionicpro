@@ -11,11 +11,39 @@ interface UserInfo {
   needs_consent?: boolean;
 }
 
+interface ReportData {
+  subject: string;
+  username: string;
+  period: { from: string; to: string };
+  days: number;
+  processed_up_to: string;
+  rows: Array<{
+    event_date: string;
+    prosthesis_serial: string;
+    model: string;
+    firmware_version: string;
+    display_name: string;
+    email: string;
+    events_count: number;
+    avg_response_ms: number;
+    p95_response_ms: number;
+    max_response_ms: number;
+    slow_events_count: number;
+    avg_signal_quality: number;
+    min_battery_level: number;
+    movements_count: number;
+    first_event_at: string;
+    last_event_at: string;
+  }>;
+  total_rows: number;
+}
+
 const ReportPage: React.FC = () => {
   const [user, setUser] = useState<UserInfo | null>(null);
   const [checking, setChecking] = useState(true);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [report, setReport] = useState<ReportData | null>(null);
 
   // Загружает информацию о пользователе (в т.ч. флаг needs_consent).
   const loadUser = async () => {
@@ -85,10 +113,11 @@ const ReportPage: React.FC = () => {
     }
   };
 
-  const downloadReport = async () => {
+  const loadReport = async () => {
     try {
       setLoading(true);
       setError(null);
+      setReport(null);
 
       // Запрос идёт через прокси bionicpro-auth. Никаких токенов в заголовках:
       // сервис сам подставит Bearer access_token из серверной сессии.
@@ -122,15 +151,8 @@ const ReportPage: React.FC = () => {
         throw new Error(`Request failed: ${response.status}`);
       }
 
-      const blob = await response.blob();
-      const url = window.URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = 'prosthesis-report.csv';
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      window.URL.revokeObjectURL(url);
+      const data: ReportData = await response.json();
+      setReport(data);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'An error occurred');
     } finally {
@@ -218,18 +240,74 @@ const ReportPage: React.FC = () => {
         </p>
 
         <button
-          onClick={downloadReport}
+          onClick={loadReport}
           disabled={loading}
           className={`px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 ${
             loading ? 'opacity-50 cursor-not-allowed' : ''
           }`}
         >
-          {loading ? 'Generating Report...' : 'Download Report'}
+          {loading ? 'Загрузка отчёта...' : 'Получить отчёт'}
         </button>
 
         {error && (
           <div className="mt-4 p-4 bg-red-100 text-red-700 rounded">
             {error}
+          </div>
+        )}
+
+        {report && (
+          <div className="mt-6 w-full">
+            <h2 className="text-xl font-bold mb-2">Отчёт о работе протеза</h2>
+            <p className="text-gray-600 mb-1">
+              Период: {report.period.from} — {report.period.to} ({report.days} дней)
+            </p>
+            <p className="text-gray-600 mb-1">
+              Данные актуальны на: {report.processed_up_to}
+            </p>
+            <p className="text-gray-600 mb-4">
+              Всего записей: {report.total_rows}
+            </p>
+
+            {report.rows.length > 0 ? (
+              <div className="overflow-x-auto">
+                <table className="min-w-full border-collapse border border-gray-300 text-sm">
+                  <thead>
+                    <tr className="bg-gray-100">
+                      <th className="border p-2">Дата</th>
+                      <th className="border p-2">Серийный №</th>
+                      <th className="border p-2">Модель</th>
+                      <th className="border p-2">Событий</th>
+                      <th className="border p-2">Ср. ответ (мс)</th>
+                      <th className="border p-2">P95 (мс)</th>
+                      <th className="border p-2">Макс (мс)</th>
+                      <th className="border p-2">Медленные</th>
+                      <th className="border p-2">Качество сигнала</th>
+                      <th className="border p-2">Батарея мин %</th>
+                      <th className="border p-2">Движений</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {report.rows.map((row, idx) => (
+                      <tr key={idx} className="hover:bg-gray-50">
+                        <td className="border p-2">{row.event_date}</td>
+                        <td className="border p-2">{row.prosthesis_serial}</td>
+                        <td className="border p-2">{row.model}</td>
+                        <td className="border p-2">{row.events_count}</td>
+                        <td className="border p-2">{row.avg_response_ms?.toFixed(1)}</td>
+                        <td className="border p-2">{row.p95_response_ms?.toFixed(1)}</td>
+                        <td className="border p-2">{row.max_response_ms?.toFixed(1)}</td>
+                        <td className="border p-2">{row.slow_events_count}</td>
+                        <td className="border p-2">{row.avg_signal_quality?.toFixed(3)}</td>
+                        <td className="border p-2">{row.min_battery_level}</td>
+                        <td className="border p-2">{row.movements_count}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <p className="text-gray-500 italic">Нет данных за выбранный период.</p>
+            )}
           </div>
         )}
       </div>
