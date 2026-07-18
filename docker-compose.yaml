@@ -147,7 +147,7 @@ services:
       CLICKHOUSE_PORT: "8123"
       CLICKHOUSE_USER: etl_user
       CLICKHOUSE_PASSWORD: etl_password
-      S3_ENDPOINT_URL: http://minio:9000
+      S3_ENDPOINT_URL: http://minio:9002
       S3_ACCESS_KEY: minioadmin
       S3_SECRET_KEY: minioadmin
       S3_BUCKET_NAME: bionicpro-reports
@@ -166,7 +166,7 @@ services:
       context: ./minio
       dockerfile: Dockerfile
     ports:
-      - "9002:9000"   # S3 API (избегаем конфликта с ClickHouse:9000)
+      - "9002:9000"   # S3 API 
       - "9003:9001"   # Minio Console
     # volumes:
     #  - minio_storage:/data
