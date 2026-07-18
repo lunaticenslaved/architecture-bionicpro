@@ -286,10 +286,25 @@ async def proxy(path: str, request: Request):
             headers=fwd_headers,
         )
 
+    # Для редиректов (302) пробрасываем Location и другие важные заголовки.
+    # Это необходимо для S3/CDN интеграции: upstream отдаёт 302 с ссылкой на CDN.
+    extra_headers = {}
+    if upstream.status_code in (301, 302, 303, 307, 308):
+        location = upstream.headers.get("location")
+        if location:
+            extra_headers["Location"] = location
+        # Пробрасываем кастомные заголовки от upstream
+        for header in ("x-report-source", "x-report-processed-up-to",
+                       "content-disposition", "cache-control"):
+            value = upstream.headers.get(header)
+            if value:
+                extra_headers[header] = value
+
     response = Response(
         content=upstream.content,
         status_code=upstream.status_code,
         media_type=upstream.headers.get("content-type"),
+        headers=extra_headers,
     )
     # Отдаём новый session_id в cookie (ротация выполнена выше).
     _set_session_cookie(response, new_session_id)
