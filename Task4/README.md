@@ -121,7 +121,8 @@ graph LR
 | `kafka-connect` | debezium/connect:2.7.3.Final (кастомный) | Kafka Connect + Debezium, инициализация коннектора при старте, REST API :8084 |
 | `kafka-ui` | provectuslabs/kafka-ui:latest | Веб-интерфейс Kafka (топики, сообщения, коннекторы) |
 | `clickhouse-cdc-init` | clickhouse/clickhouse-server:24.3 | Одноразовое применение CDC-схемы |
-| `clickhouse-ui` | elestio/clickhouse-ui:latest | Веб-интерфейс ClickHouse (SQL-запросы, reverse proxy к CH) |
+| `clickhouse-ui` | tabix/tabix:latest | Веб-интерфейс ClickHouse (SQL-запросы) |
+| `telemetry-api` | telemetry-api (кастомный) | FastAPI для записи телеметрии с протезов в ClickHouse |
 
 ## Изменения в существующих сервисах
 
@@ -147,6 +148,7 @@ graph LR
 | kafka-connect | 8084 | REST API Debezium (8083 занят minio-nginx) |
 | kafka-ui | 8085 | Веб-интерфейс Kafka (топики, сообщения, Connect) |
 | clickhouse-ui | 8086 | Веб-интерфейс ClickHouse (SQL-запросы) |
+| telemetry-api | 8092 | REST API для записи телеметрии с протезов |
 | остальные | без изменений | |
 
 ## Инструкция по проверке
@@ -185,7 +187,48 @@ curl http://localhost:8084/connectors/crm-connector/status | jq .
 
 Ожидается: `"state": "RUNNING"`
 
-### 4. Проверка CDC: INSERT в CRM → ClickHouse
+### 4. Проверка записи телеметрии через Telemetry API
+
+Отправить событие телеметрии:
+```bash
+curl -X POST http://localhost:8092/telemetry/events \
+  -H "Content-Type: application/json" \
+  -d '{
+    "subject": "11111111-1111-1111-1111-111111111111",
+    "prosthesis_serial": "BP-ARM-0001",
+    "event_type": "movement",
+    "response_time_ms": 45,
+    "signal_quality": 0.87,
+    "battery_level": 85
+  }'
+```
+
+Ожидается ответ: `{"status": "ok", "recorded_at": "..."}`
+
+Проверить, что данные появились в ClickHouse:
+
+**Через UI** — http://localhost:8086:
+```sql
+SELECT subject, prosthesis_serial, event_type, response_time_ms, signal_quality
+FROM telemetry.events
+WHERE prosthesis_serial = 'BP-ARM-0001'
+ORDER BY event_time DESC
+LIMIT 5
+```
+
+**Через CLI:**
+```bash
+docker exec -i bionicpro-clickhouse clickhouse-client -u etl_user --password etl_password --query "
+SELECT subject, prosthesis_serial, event_type, response_time_ms, signal_quality
+FROM telemetry.events
+WHERE prosthesis_serial = 'BP-ARM-0001'
+ORDER BY event_time DESC
+LIMIT 5
+FORMAT PrettyCompact
+"
+```
+
+### 5. Проверка CDC: INSERT в CRM → ClickHouse
 
 Вставить строку в CRM:
 ```bash
@@ -197,7 +240,7 @@ EOF
 
 Проверить появление в ClickHouse (через несколько секунд):
 
-**Через UI** — http://localhost:8086 → выполнить:
+**Через UI** — http://localhost:8086:
 ```sql
 SELECT subject, username, display_name, email, is_deleted
 FROM cdc.user_profile FINAL
@@ -214,7 +257,7 @@ FORMAT PrettyCompact
 "
 ```
 
-### 5. Проверка DELETE
+### 6. Проверка DELETE
 
 ```bash
 docker exec -i bionicpro-crm-db psql -U crm_user -d crm_db <<EOF
@@ -229,7 +272,7 @@ FROM cdc.user_profile FINAL
 WHERE subject = 'test-cdc-001'
 ```
 
-### 6. Проверка витрины отчётов
+### 7. Проверка витрины отчётов
 
 **Через UI** — http://localhost:8086:
 ```sql
@@ -250,7 +293,7 @@ FORMAT PrettyCompact
 "
 ```
 
-### 7. Проверка Reports API
+### 8. Проверка Reports API
 
 ```bash
 curl -s http://localhost:8091/reports?days=7 \
