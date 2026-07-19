@@ -401,23 +401,6 @@ services:
       kafka:
         condition: service_healthy
 
-  # Метаданные Airflow.
-  airflow_db:
-    image: postgres:14
-    container_name: bionicpro-airflow-db
-    environment:
-      POSTGRES_DB: airflow
-      POSTGRES_USER: airflow
-      POSTGRES_PASSWORD: airflow
-    volumes:
-      - airflow_db_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U airflow -d airflow"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
-      start_period: 10s
-
   # Одноразовая инициализация Airflow: миграции метабазы + admin-юзер.
   airflow-init:
     image: apache/airflow:2.9.3
