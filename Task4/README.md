@@ -121,7 +121,7 @@ graph LR
 | `kafka-connect` | debezium/connect:2.7.3.Final (кастомный) | Kafka Connect + Debezium, инициализация коннектора при старте, REST API :8084 |
 | `kafka-ui` | provectuslabs/kafka-ui:latest | Веб-интерфейс Kafka (топики, сообщения, коннекторы) |
 | `clickhouse-cdc-init` | clickhouse/clickhouse-server:24.3 | Одноразовое применение CDC-схемы |
-| `clickhouse-ui` | spoonest/clickhouse-tabix-web-client:latest | Веб-интерфейс ClickHouse (SQL-запросы, просмотр БД) |
+| `clickhouse-ui` | elestio/clickhouse-ui:latest | Веб-интерфейс ClickHouse (SQL-запросы, reverse proxy к CH) |
 
 ## Изменения в существующих сервисах
 
@@ -146,7 +146,7 @@ graph LR
 | kafka | — | только внутренняя сеть, kafka:9092 |
 | kafka-connect | 8084 | REST API Debezium (8083 занят minio-nginx) |
 | kafka-ui | 8085 | Веб-интерфейс Kafka (топики, сообщения, Connect) |
-| clickhouse-ui | 8086 | Веб-интерфейс ClickHouse (Tabix, SQL-запросы) |
+| clickhouse-ui | 8086 | Веб-интерфейс ClickHouse (SQL-запросы) |
 | остальные | без изменений | |
 
 ## Инструкция по проверке
@@ -169,8 +169,9 @@ docker-compose up -d --build
 - Вкладка **Connect** — проверить статус коннектора `crm-connector` (должен быть RUNNING)
 - Вкладка **Messages** — просмотреть сообщения в топике
 
-**ClickHouse UI (Tabix)** — http://localhost:8086
-- Подключение уже настроено (user: `etl_user`, password: `etl_password`, host: `clickhouse:8123`)
+**ClickHouse UI** — http://localhost:8086
+- Параметры подключения (заполняются автоматически из env):
+  - Host: `clickhouse`, Port: `8123`, User: `etl_user`, Password: `etl_password`
 - Выполнить запрос для проверки CDC-таблиц:
   ```sql
   SELECT name, engine FROM system.tables WHERE database IN ('cdc', 'olap')

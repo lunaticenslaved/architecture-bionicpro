@@ -385,16 +385,18 @@ services:
       kafka:
         condition: service_healthy
 
-  # ClickHouse UI (Tabix) — веб-интерфейс для выполнения запросов и просмотра БД.
+  # ClickHouse UI — веб-интерфейс для выполнения SQL-запросов и просмотра БД.
+  # Работает как reverse proxy: запросы к ClickHouse идут через сервер, а не из браузера.
   clickhouse-ui:
-    image: spoonest/clickhouse-tabix-web-client:latest
+    image: elestio/clickhouse-ui:latest
     container_name: bionicpro-clickhouse-ui
     ports:
-      - "8086:80"
+      - "8086:3000"
     environment:
-      CH_HOST: http://clickhouse:8123
-      CH_USER: etl_user
-      CH_PASSWORD: etl_password
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_PORT: "8123"
+      CLICKHOUSE_USER: etl_user
+      CLICKHOUSE_PASSWORD: etl_password
     depends_on:
       clickhouse:
         condition: service_healthy
