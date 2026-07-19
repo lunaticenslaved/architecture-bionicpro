@@ -224,7 +224,7 @@ AS SELECT
     a.subject,
     countMerge(a.events_count)          AS events_count,
     avgMerge(a.avg_response_ms)         AS avg_response_ms,
-    quantileMerge(a.p95_response_ms)    AS p95_response_ms,
+    quantileMerge(0.95)(a.p95_response_ms) AS p95_response_ms,
     maxMerge(a.max_response_ms)         AS max_response_ms,
     countIfMerge(a.slow_events_count)   AS slow_events_count,
     avgMerge(a.avg_signal_quality)      AS avg_signal_quality,
@@ -233,9 +233,9 @@ AS SELECT
     minMerge(a.first_event_at)          AS first_event_at,
     maxMerge(a.last_event_at)           AS last_event_at
 FROM olap.telemetry_daily_agg AS a
-LEFT JOIN cdc.user_profile FINAL AS u
+LEFT JOIN cdc.user_profile AS u FINAL
     ON a.subject = u.subject AND u.is_deleted = 0
-LEFT JOIN cdc.prosthesis FINAL AS p
+LEFT JOIN cdc.prosthesis AS p FINAL
     ON a.prosthesis_serial = p.serial_number AND p.is_deleted = 0
 GROUP BY
     a.event_date,
