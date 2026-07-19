@@ -1,19 +1,17 @@
 FROM debezium/connect:2.7.3.Final
 
 USER root
-
-# Устанавливаем curl для healthcheck и python3 для форматирования JSON
-RUN microdnf install -y curl python3 && microdnf clean all
-
-# Копируем скрипт инициализации и конфиг коннектора
-COPY init.sh /init.sh
-COPY crm-connector.json /crm-connector.json
-
-RUN chmod +x /init.sh
-
+RUN microdnf install -y jq curl && microdnf clean all
 USER kafka
 
-ENTRYPOINT ["/init.sh"]
+COPY --chown=kafka:kafka crm-connector-config.json /tmp/crm-connector-config.json
+COPY --chown=kafka:kafka telemetry-connector-config.json /tmp/telemetry-connector-config.json
 
-HEALTHCHECK --interval=10s --timeout=5s --retries=20 --start-period=30s \
-  CMD curl -f http://localhost:8083/connectors || exit 1
+COPY --chown=kafka:kafka init-connector.sh /usr/local/bin/init-connector.sh
+RUN chmod +x /usr/local/bin/init-connector.sh
+
+COPY --chown=kafka:kafka docker-entrypoint-wrapper.sh /usr/local/bin/docker-entrypoint-wrapper.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint-wrapper.sh
+
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint-wrapper.sh"]
+CMD ["start"]
