@@ -1,13 +1,17 @@
 #!/bin/bash
 # BionicPRO — Debezium connector init script.
-# Регистрирует коннекторы через REST API Kafka Connect.
+# Регистрирует все коннекторы из массива CONNECTORS через REST API Kafka Connect.
 # Запускается после того, как Kafka Connect полностью загрузился.
 
 set -euo pipefail
 
 CONNECT_URL="http://localhost:8083"
-CONNECTOR_CONFIG="/tmp/crm-connector-config.json"
-CONNECTOR_NAME="crm-connector"
+
+# Массив коннекторов: имя_коннектора:путь_к_конфигу
+CONNECTORS=(
+  "crm-connector:/tmp/crm-connector-config.json"
+  "telemetry-connector:/tmp/telemetry-connector-config.json"
+)
 
 echo "[init-connector] Waiting for Kafka Connect REST API at ${CONNECT_URL}..."
 
@@ -21,30 +25,36 @@ for i in $(seq 1 30); do
   sleep 3
 done
 
-# Регистрируем CRM-коннектор (PUT — идемпотентно)
-echo "[init-connector] Registering connector '${CONNECTOR_NAME}'..."
-HTTP_CODE=$(curl -s -o /tmp/connector_response.json -w "%{http_code}" \
-  -X PUT \
-  -H "Content-Type: application/json" \
-  --data-binary "@${CONNECTOR_CONFIG}" \
-  "${CONNECT_URL}/connectors/${CONNECTOR_NAME}/config"
-)
+# Регистрируем каждый коннектор из массива
+for connector_entry in "${CONNECTORS[@]}"; do
+  IFS=':' read -r CONNECTOR_NAME CONNECTOR_CONFIG <<< "${connector_entry}"
 
-echo "[init-connector] HTTP response code: ${HTTP_CODE}"
-cat /tmp/connector_response.json
+  echo "[init-connector] Registering connector '${CONNECTOR_NAME}' from ${CONNECTOR_CONFIG}..."
+
+  HTTP_CODE=$(curl -s -o /tmp/connector_response.json -w "%{http_code}" \
+    -X PUT \
+    -H "Content-Type: application/json" \
+    --data-binary "@${CONNECTOR_CONFIG}" \
+    "${CONNECT_URL}/connectors/${CONNECTOR_NAME}/config"
+  )
+
+  echo "[init-connector] HTTP response code: ${HTTP_CODE}"
+  cat /tmp/connector_response.json
+  echo ""
+
+  if [ "${HTTP_CODE}" -ge 200 ] && [ "${HTTP_CODE}" -lt 300 ]; then
+    echo "[init-connector] Connector '${CONNECTOR_NAME}' registered successfully."
+  else
+    echo "[init-connector] WARNING: Failed to register connector '${CONNECTOR_NAME}'."
+  fi
+done
+
+# Проверяем статус всех коннекторов
 echo ""
-
-if [ "${HTTP_CODE}" -ge 200 ] && [ "${HTTP_CODE}" -lt 300 ]; then
-  echo "[init-connector] Connector '${CONNECTOR_NAME}' registered successfully."
-else
-  echo "[init-connector] WARNING: Failed to register connector '${CONNECTOR_NAME}'."
-fi
-
-# Проверяем статус
-echo "[init-connector] Checking connector status..."
+echo "[init-connector] Checking all connectors status..."
 sleep 2
-curl -sf "${CONNECT_URL}/connectors/${CONNECTOR_NAME}/status" | jq . 2>/dev/null || \
-  curl -sf "${CONNECT_URL}/connectors/${CONNECTOR_NAME}/status"
+curl -sf "${CONNECT_URL}/connectors?expand=status" | jq . 2>/dev/null || \
+  curl -sf "${CONNECT_URL}/connectors?expand=status"
 
 echo ""
 echo "[init-connector] Init complete."
