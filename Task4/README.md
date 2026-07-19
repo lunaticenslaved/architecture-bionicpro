@@ -195,11 +195,11 @@ curl -X POST http://localhost:8092/telemetry/events \
 
 Ожидается ответ: `{"status": "ok", "recorded_at": "..."}`
 
-Проверить, что данные появились в ClickHouse:
+Проверить, что данные появились в ClickHouse (новая запись будет на самом верху):
 
 ```bash
 docker exec -i bionicpro-clickhouse clickhouse-client -u etl_user --password etl_password --query "
-SELECT subject, prosthesis_serial, event_type, response_time_ms, signal_quality
+SELECT subject, prosthesis_serial, event_type, response_time_ms, signal_quality, event_time
 FROM telemetry.events
 WHERE prosthesis_serial = 'BP-ARM-0001'
 ORDER BY event_time DESC

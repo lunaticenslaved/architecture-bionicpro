@@ -219,13 +219,13 @@ GROUP BY subject, prosthesis_serial, event_date;
 -- VIEW уже финализирован — запросы без FINAL.
 CREATE OR REPLACE VIEW olap.user_prosthesis_report_mart_v2
 AS SELECT
-    a.event_date,
-    a.prosthesis_serial,
-    p.model,
-    p.firmware_version,
-    u.display_name,
-    u.email,
-    a.subject,
+    a.event_date AS event_date,
+    a.prosthesis_serial AS prosthesis_serial,
+    p.model AS model,
+    p.firmware_version AS firmware_version,
+    u.display_name AS display_name,
+    u.email AS email,
+    a.subject AS subject,
     countMerge(a.events_count)          AS events_count,
     avgMerge(a.avg_response_ms)         AS avg_response_ms,
     quantileMerge(0.95)(a.p95_response_ms) AS p95_response_ms,
