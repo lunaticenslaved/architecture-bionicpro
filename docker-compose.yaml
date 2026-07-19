@@ -12,7 +12,11 @@ services:
     ports:
       - "5433:5432"
   keycloak:
-    image: quay.io/keycloak/keycloak:21.1
+    # Кастомный образ: базовый Keycloak 21.1.1 + нативный провайдер «Яндекс»
+    # (OAuth 2.0, без принудительного scope openid). См. keycloak/Dockerfile.
+    build:
+      context: ./keycloak
+      dockerfile: Dockerfile
     environment:
       KEYCLOAK_ADMIN: admin
       KEYCLOAK_ADMIN_PASSWORD: admin
@@ -20,7 +24,16 @@ services:
       KC_DB_URL: jdbc:postgresql://keycloak_db:5432/keycloak_db
       KC_DB_USERNAME: keycloak_user
       KC_DB_PASSWORD: keycloak_password
-    command: 
+      YANDEX_CLIENT_ID: ${YANDEX_CLIENT_ID:-}
+      YANDEX_CLIENT_SECRET: ${YANDEX_CLIENT_SECRET:-}
+      # Фиксируем единственный канонический issuer для всех токенов.
+      # Без этого Keycloak в start-dev режиме проставляет iss на основе
+      # входящего Host-заголовка: браузер даёт localhost:8080, а внутренние
+      # вызовы bionicpro-auth идут через keycloak:8080 — разные iss → 401
+      # на /broker/yandex/token при валидации Bearer-токена.
+      KC_HOSTNAME_URL: http://localhost:8080
+      KC_HOSTNAME_STRICT: "false"
+    command:
       - start-dev
       - --import-realm
     volumes:
@@ -29,6 +42,299 @@ services:
       - "8080:8080"
     depends_on:
       - keycloak_db
+      - openldap
+    healthcheck:
+      test: ["CMD-SHELL", "timeout 3 bash -c 'exec 3<>/dev/tcp/localhost/8080'" ]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 20s
+
+  # LDAP-сервер представительства BionicPRO в другой стране.
+  # Данные пользователей и ролей хранятся локально (data residency),
+  # Keycloak ходит сюда за аутентификацией по federation.
+  openldap:
+    image: osixia/openldap:1.5.0
+    container_name: bionicpro-openldap
+    command: --copy-service
+    environment:
+      LDAP_ORGANISATION: "BionicPRO"
+      LDAP_DOMAIN: "example.com"
+      LDAP_ADMIN_PASSWORD: "admin"
+      LDAP_BASE_DN: "dc=example,dc=com"
+    volumes:
+      # Bootstrap LDIF с пользователями и ролями представительства.
+      - ./ldap/config.ldif:/container/service/slapd/assets/config/bootstrap/ldif/custom/config.ldif:ro
+      - openldap_data:/var/lib/ldap
+      - openldap_config:/etc/ldap/slapd.d
+    ports:
+      - "389:389"
+      - "636:636"
+
+  # Веб-UI для инспекции содержимого LDAP (пользователи, группы, роли).
+  phpldapadmin:
+    image: osixia/phpldapadmin:0.9.0
+    container_name: bionicpro-phpldapadmin
+    environment:
+      PHPLDAPADMIN_LDAP_HOSTS: openldap
+      PHPLDAPADMIN_HTTPS: "false"
+    ports:
+      - "8081:80"
+    depends_on:
+      - openldap
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  # БД CRM-сервиса — система-источник истины по клиентам BionicPRO.
+  crm_db:
+    image: postgres:14
+    container_name: bionicpro-crm-db
+    command: ["postgres", "-c", "wal_level=logical"]
+    environment:
+      POSTGRES_DB: crm_db
+      POSTGRES_USER: crm_user
+      POSTGRES_PASSWORD: crm_password
+    volumes:
+      - crm_db_data:/var/lib/postgresql/data
+      # Сид Task 2: схема + демо-клиенты и их протезы (источник для ETL).
+      # Выполняется только при первом старте (пустой том crm_db_data).
+      - ./crm-db/init:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "5434:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U crm_user -d crm_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  # ------------------------------------------------------------------
+  # Task 4: CDC-контур (Debezium → Kafka → ClickHouse)
+  # ------------------------------------------------------------------
+
+  # Kafka (KRaft, один брокер). Без ZooKeeper — режим KRaft.
+  kafka:
+    image: confluentinc/cp-kafka:7.7.0
+    container_name: bionicpro-kafka
+    environment:
+      # Режим KRaft: один узел выполняет роли broker + controller.
+      KAFKA_NODE_ID: "1"
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@localhost:9093"
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      # Авто-создание топиков для Debezium.
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      # Хранение данных.
+      CLUSTER_ID: "bionicpro-cdc-cluster"
+      # Отключаем ZooKeeper
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-topics --bootstrap-server localhost:9092 --list || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  # Kafka Connect + Debezium — CDC-коннектор к PostgreSQL.
+  # Инициализация коннектора происходит внутри контейнера через init.sh.
+  kafka-connect:
+    build:
+      context: ./debezium
+      dockerfile: Dockerfile
+    container_name: bionicpro-kafka-connect
+    environment:
+      BOOTSTRAP_SERVERS: kafka:9092
+      GROUP_ID: "bionicpro-cdc"
+      CONFIG_STORAGE_TOPIC: "bionicpro-cdc-config"
+      OFFSET_STORAGE_TOPIC: "bionicpro-cdc-offset"
+      STATUS_STORAGE_TOPIC: "bionicpro-cdc-status"
+      # JSON-конвертеры без схем (schemas.enable=false) — плоский JSON для ClickHouse.
+      KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      KEY_CONVERTER_SCHEMAS_ENABLE: "false"
+      VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
+      # Логи.
+      LOG_LEVEL: INFO
+    ports:
+      - "8084:8083"   # REST API (8083 занят minio-nginx)
+    depends_on:
+      kafka:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8083/connectors || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+
+  # Kafka UI — веб-интерфейс для просмотра топиков, сообщений и коннекторов.
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: bionicpro-kafka-ui
+    ports:
+      - "8085:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: bionicpro-cdc
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+      KAFKA_CLUSTERS_0_KAFKACONNECT_0_NAME: bionicpro-connect
+      KAFKA_CLUSTERS_0_KAFKACONNECT_0_ADDRESS: http://kafka-connect:8083
+    depends_on:
+      kafka:
+        condition: service_healthy
+      kafka-connect:
+        condition: service_healthy
+
+  # CRM API — владелец клиентских данных. Сюда сохраняется профиль
+  # пользователя из Яндекса и журнал согласий. Auth Proxy ходит только сюда,
+  # напрямую в БД не лезет (соблюдение границ сервисов).
+  crm-api:
+    build:
+      context: ./crm-api
+      dockerfile: Dockerfile
+    ports:
+      - "8090:8080"
+    environment:
+      DATABASE_URL: postgresql://crm_user:crm_password@crm_db:5432/crm_db
+      KEYCLOAK_URL: http://keycloak:8080
+      KEYCLOAK_REALM: reports-realm
+    depends_on:
+      crm_db:
+        condition: service_healthy
+
+  # Reports API (Task 3) — сервис отчётов о работе протезов.
+  # Отдаёт готовый отчёт пользователя из витрины OLAP (ClickHouse),
+  # подготовленной Airflow DAG-ом (Task 2). Валидирует Bearer JWT
+  # по JWKS Keycloak, RBAC: роль prothetic_user, данные — только свои (sub).
+  reports-api:
+    build:
+      context: ./reports-api
+      dockerfile: Dockerfile
+    ports:
+      - "8091:8080"
+    environment:
+      KEYCLOAK_URL: http://keycloak:8080
+      KEYCLOAK_PUBLIC_URL: http://localhost:8080
+      KEYCLOAK_REALM: reports-realm
+      REPORTS_ROLE: prothetic_user
+      ADMIN_ROLE: administrator
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_PORT: "8123"
+      CLICKHOUSE_USER: etl_user
+      CLICKHOUSE_PASSWORD: etl_password
+      S3_ENDPOINT_URL: http://minio:9000
+      S3_ACCESS_KEY: minioadmin
+      S3_SECRET_KEY: minioadmin
+      S3_BUCKET_NAME: bionicpro-reports
+      CDN_URL_PREFIX: http://localhost:8083/bionicpro-reports
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+      keycloak:
+        condition: service_started
+      minio:
+        condition: service_healthy
+
+  # Telemetry API — запись данных телеметрии с протезов в ClickHouse.
+  telemetry-api:
+    build:
+      context: ./telemetry-api
+      dockerfile: Dockerfile
+    ports:
+      - "8092:8080"
+    environment:
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_PORT: "8123"
+      CLICKHOUSE_USER: etl_user
+      CLICKHOUSE_PASSWORD: etl_password
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+
+  minio:
+    container_name: bionicpro-minio
+    build:
+      context: ./minio
+      dockerfile: Dockerfile
+    ports:
+      - "9002:9000"   # S3 API 
+      - "9003:9001"   # Minio Console
+    # volumes:
+    #  - minio_storage:/data
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+      # Временно отключаем OIDC для тестирования базовой функциональности
+      # MINIO_IDENTITY_OPENID_CLAIM_NAME: "policy"
+    depends_on:
+      keycloak:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  minio-nginx:
+    container_name: minio-nginx
+    build:
+      context: ./minio-nginx 
+      dockerfile: Dockerfile
+    depends_on:
+      minio:
+        condition: service_healthy  # Ждём готовности MinIO
+    ports:
+      - "8083:8083"
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f 'nginx: master process' || exit 1"]  # Проверка, что nginx процесс запущен
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+
+  bionicpro-auth:
+    build:
+      context: ./bionicpro-auth
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      KEYCLOAK_URL: http://keycloak:8080
+      KEYCLOAK_PUBLIC_URL: http://localhost:8080
+      KEYCLOAK_REALM: reports-realm
+      KEYCLOAK_CLIENT_ID: bionicpro-auth
+      KEYCLOAK_CLIENT_SECRET: bionicpro-auth-secret-CHANGE-ME
+      REDIRECT_URI: http://localhost:8000/auth/callback
+      FRONTEND_URL: http://localhost:3000
+      UPSTREAM_API_URL: http://reports-api:8080
+      REDIS_URL: redis://redis:6379/0
+      SESSION_TTL_SECONDS: "1800"
+      COOKIE_SECURE: "false"
+      # Ключ Fernet для шифрования refresh_token. В проде — из секрета.
+      FERNET_KEY: "3sJgQe0hKcq1Xr9mVt7yZbNwPdLfUvHsAoIkEjMcRnQ="
+      # CRM API — куда Auth Proxy отправляет профиль из Яндекса и согласия.
+      CRM_API_URL: http://crm-api:8080
+      # Alias внешнего IdP (Identity Brokering) — по нему сервис узнаёт вход через Яндекс.
+      YANDEX_IDP_ALIAS: yandex
+      # Endpoint Яндекса для получения профиля по broker access_token.
+      YANDEX_USERINFO_URL: https://login.yandex.ru/info?format=json
+    depends_on:
+      - keycloak
+      - redis
+      - crm-api
+      - reports-api
+
   frontend:
     build:
       context: ./frontend
@@ -36,7 +342,155 @@ services:
     ports:
       - "3000:3000"
     environment:
-      REACT_APP_API_URL: http://localhost:8000
-      REACT_APP_KEYCLOAK_URL: http://localhost:8080
-      REACT_APP_KEYCLOAK_REALM: reports-realm
-      REACT_APP_KEYCLOAK_CLIENT_ID: reports-frontend
+      REACT_APP_AUTH_URL: http://localhost:8000
+    depends_on:
+      - bionicpro-auth
+
+  # ------------------------------------------------------------------
+  # Task 2: аналитический контур (Telemetry/OLAP ClickHouse + Airflow)
+  # ------------------------------------------------------------------
+
+  # ClickHouse: БД `telemetry` (сырая телеметрия протезов, источник) и
+  # БД `olap` (витрина для Reports API, создаётся DAG-ом).
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.3
+    container_name: bionicpro-clickhouse
+    environment:
+      CLICKHOUSE_USER: etl_user
+      CLICKHOUSE_PASSWORD: etl_password
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+      # Схема telemetry + демо-события; выполняется при первом старте.
+      - ./clickhouse/init:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "8123:8123"   # HTTP-интерфейс (clickhouse-connect)
+      - "9000:9000"   # native protocol
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8123/ping | grep -q Ok"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+  # Одноразовая инициализация CDC-схем ClickHouse (KafkaEngine, MV, VIEW).
+  # Выполняется после готовности Kafka и ClickHouse.
+  clickhouse-cdc-init:
+    image: clickhouse/clickhouse-server:24.3
+    container_name: bionicpro-clickhouse-cdc-init
+    entrypoint:
+      - /bin/bash
+      - -c
+      - |
+        echo "Waiting for ClickHouse to be ready..."
+        until wget -qO- http://clickhouse:8123/ping | grep -q Ok; do
+          sleep 2
+        done
+        echo "Applying CDC schema..."
+        clickhouse-client --host clickhouse --user etl_user --password etl_password --multiquery < /cdc-init.sql
+        echo "CDC schema applied successfully."
+    volumes:
+      - ./clickhouse/cdc/02_cdc_kafka_olap.sql:/cdc-init.sql:ro
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+
+  # Одноразовая инициализация Airflow: миграции метабазы + admin-юзер.
+  airflow-init:
+    image: apache/airflow:2.9.3
+    container_name: bionicpro-airflow-init
+    environment:
+      &airflow-env
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow_db:5432/airflow
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__DEFAULT_TIMEZONE: Europe/Moscow
+      AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "true"
+      # Зависимости DAG-а (для прода — собственный образ, здесь — runtime pip).
+      _PIP_ADDITIONAL_REQUIREMENTS: "clickhouse-connect==0.7.19"
+      # Подключения ETL (см. airflow/dags/crm_to_olap_etl.py)
+      CRM_POSTGRES_DSN: postgresql://crm_user:crm_password@crm_db:5432/crm_db
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_PORT: "8123"
+      CLICKHOUSE_USER: etl_user
+      CLICKHOUSE_PASSWORD: etl_password
+      MART_WINDOW_DAYS: "2"
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        airflow db migrate
+        airflow users create \
+          --username admin --password admin \
+          --firstname Admin --lastname Admin \
+          --role Admin --email admin@bionicpro.example
+    depends_on:
+      airflow_db:
+        condition: service_healthy
+
+  airflow-scheduler:
+    image: apache/airflow:2.9.3
+    container_name: bionicpro-airflow-scheduler
+    environment:
+      <<: *airflow-env
+    command: scheduler
+    restart: unless-stopped
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags:ro
+      - airflow_logs:/opt/airflow/logs
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+      clickhouse:
+        condition: service_healthy
+      crm_db:
+        condition: service_healthy
+
+  airflow-webserver:
+    image: apache/airflow:2.9.3
+    container_name: bionicpro-airflow-webserver
+    environment:
+      <<: *airflow-env
+    command: webserver
+    restart: unless-stopped
+    ports:
+      - "8082:8080"   # UI Airflow: http://localhost:8082 (admin/admin)
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags:ro
+      - airflow_logs:/opt/airflow/logs
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+  # Метаданные Airflow.
+  airflow_db:
+    image: postgres:14
+    container_name: bionicpro-airflow-db
+    environment:
+      POSTGRES_DB: airflow
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+    volumes:
+      - airflow_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U airflow -d airflow"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+volumes:
+  openldap_data:
+  openldap_config:
+  crm_db_data:
+  clickhouse_data:
+  airflow_db_data:
+  airflow_logs:
+  minio_data:
+  kafka_data:
