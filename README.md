@@ -1,196 +1,84 @@
 # BionicPRO
 
-## Состав окружения (docker-compose)
+Учебный проект: безопасная аутентификация (Keycloak + BFF), ETL/CDC-аналитика и отчёты.
+
+Подробности по задачам: [Task1](Task1/README.md) · [Task2](Task2/README.md) · [Task3](Task3/README.md) · [Task4](Task4/README.md)
+
+## Состав окружения
 
 | Сервис | Порт | Назначение |
 |--------|------|------------|
 | `keycloak` | 8080 | Identity Broker, User Federation, OTP |
-| `keycloak_db` | 5433 | БД Keycloak (postgres) |
-| `openldap` | 389/636 | Каталог пользователей представительства |
-| `phpldapadmin` | 8081 | Веб-UI для LDAP |
-| `redis` | 6379 | Серверные сессии Auth Proxy |
+| `openldap` / `phpldapadmin` | 389 / 8081 | Каталог пользователей + веб-UI |
+| `redis` | 6379 | Сессии Auth Proxy |
 | `bionicpro-auth` | 8000 | Auth Proxy (BFF) |
-| `crm-api` | 8090 | CRM API — владелец клиентских данных |
-| `crm_db` | 5434 | БД CRM (профиль + согласия) |
+| `crm-api` / `crm_db` | 8090 / 5434 | CRM API и БД |
 | `frontend` | 3000 | React-приложение |
+| `clickhouse` | 8123 | OLAP (telemetry + витрины) |
+| `airflow-webserver` | 8082 | Airflow UI (admin/admin) |
+| `reports-api` | 8091 | Сервис отчётов |
+| `minio` / `nginx-cdn` | 9002 / 8083 | S3-кэш отчётов + CDN |
+| `kafka-connect` / `kafka-ui` | 8084 / 8085 | Debezium CDC + веб-UI Kafka |
+| `telemetry-api` | 8092 | Приём телеметрии с протезов |
 
----
-
-# Поэтапная проверка
-
-## 0. Предварительная подготовка
+## Запуск
 
 ```bash
-cp .env.example .env
-#   затем указать в .env реальные YANDEX_CLIENT_ID / YANDEX_CLIENT_SECRET
-#   (со страницы приложения на https://oauth.yandex.ru).
-#   Redirect URI приложения Яндекса:
-#   http://localhost:8080/realms/reports-realm/broker/yandex/endpoint
-#   docker compose подставит эти значения в realm-export.json (${YANDEX_CLIENT_ID})
-#   при импорте realm. Файл .env в .gitignore и в репозиторий не попадает.
-
-# Поднять всё окружение (Keycloak собирается из keycloak/Dockerfile —
-# базовый образ + нативный провайдер «Яндекс»)
+cp .env.example .env   # указать YANDEX_CLIENT_ID / YANDEX_CLIENT_SECRET
 docker compose up -d --build
-
-# Убедиться, что все контейнеры запустились
 docker compose ps
 ```
 
-> **Почему кастомный образ Keycloak?**
-> Яндекс ID — это OAuth 2.0, а не OpenID Connect. Встроенный generic-провайдер
-> типа `oidc` по спецификации OIDC принудительно добавляет scope `openid`, на
-> который Яндекс отвечает ошибкой `invalid_scope`; отключить это в настройках
-> нельзя. Поэтому мы ставим расширение
-> [`playa-ru/keycloak-russian-providers`](https://github.com/playa-ru/keycloak-russian-providers),
-> дающее нативный тип провайдера `yandex` на чистом OAuth2 (без `openid`).
-> Сборка — в [`keycloak/Dockerfile`](keycloak/Dockerfile:1).
+> **Кастомный образ Keycloak**: Яндекс ID — OAuth 2.0 без OIDC, поэтому используется
+> расширение [`playa-ru/keycloak-russian-providers`](https://github.com/playa-ru/keycloak-russian-providers)
+> (нативный провайдер `yandex`). Сборка — [`keycloak/Dockerfile`](keycloak/Dockerfile).
 
-> ⚠️ Если Keycloak уже запускался — realm уже в БД, и правки
-> [`keycloak/realm-export.json`](keycloak/realm-export.json:1) при обычном
-> рестарте **не применяются** (`--import-realm` пропускает существующий realm).
-> Полный переимпорт:
-> ```bash
-> docker compose down -v
-> sudo rm -rf ./postgres-keycloak-data
-> docker compose up -d --build
-> ```
+> ⚠️ Правки `realm-export.json` не применяются к уже существующему realm.
+> Полный переимпорт: `docker compose down -v && sudo rm -rf ./postgres-keycloak-data && docker compose up -d --build`
 
-Дождаться, пока Keycloak импортирует realm:
+## Проверка
+
+### PKCE S256
+Открыть <http://localhost:3000> → **Login**. В редиректе на Keycloak должны быть
+`code_challenge=...&code_challenge_method=S256`. Вход: `user1/password123`.
+
+### Auth Proxy (BFF)
+После входа в DevTools → Cookies: только `session_id` (**HttpOnly**, SameSite=Lax),
+токенов в браузере нет. Токены — в Redis (`docker exec -it $(docker compose ps -q redis) redis-cli KEYS "session:*"`).
+`session_id` ротируется при каждом запросе; access_token (TTL 120 c) обновляется автоматически.
+
+### LDAP-федерация
+Админка Keycloak → User Federation → `ldap-bionicpro` → Test connection/authentication →
+Synchronize all users. Вход `john.doe/password` → роль `prothetic_user`
+(маппинг из LDAP-групп). Детали и известная особенность с DN Alex — [`ldap/README.md`](ldap/README.md).
+
+### OTP (2FA)
+При первом входе Keycloak требует привязать TOTP (QR-код для Google Authenticator/FreeOTP),
+далее при каждом входе запрашивается код. Настройка — в realm-export
+(OTP Policy = TOTP, Configure OTP = Default Action).
+
+### Вход через Яндекс ID + согласие
+<http://localhost:3000> → «Войти через Яндекс ID» → после входа приложение
+спрашивает разрешение на использование данных. При согласии профиль Яндекса
+сохраняется в CRM, решение фиксируется в `crm.user_consent`:
 
 ```bash
-docker compose logs -f keycloak | grep -i import
+docker exec -it bionicpro-crm-db psql -U crm_user -d crm_db \
+  -c "SELECT subject, email, display_name FROM crm.user_profile;"
 ```
-
----
-
-## Задача 2 — PKCE S256
-
-**Цель:** авторизация идёт по Authorization Code Flow с PKCE, без Implicit/Code Grant без PKCE.
-
-1. Открыть <http://localhost:3000>, нажать **Login**.
-2. В адресной строке при редиректе на Keycloak проверить наличие параметров
-   `code_challenge=...` и `code_challenge_method=S256`.
-3. В форме регистрации ввести `user1/password123`.
-
-✅ Ожидание: вход проходит, в запросе есть `code_challenge` с методом S256.
-
----
-
-## Задача 3 — Auth Proxy (BFF): токены на сервере
-
-**Цель:** токены не попадают в браузер; сессия — только HttpOnly-cookie; авто-refresh и ротация.
-
-1. Войти на <http://localhost:3000>.
-2. DevTools → Application → Cookies для `localhost:8000`: есть cookie
-   `session_id` с флагами **HttpOnly** и **SameSite=Lax**. Токенов (JWT) в
-   cookie/localStorage быть **не должно**.
-3. Проверить, что токены хранятся в Redis (в зашифрованном виде refresh_token):
-   ```bash
-   docker exec -it $(docker compose ps -q redis) redis-cli KEYS "session:*"
-   ```
-4. **Ротация session_id:** повторный запрос к защищённому ресурсу выдаёт новую
-   cookie `session_id` (значение меняется), старый ключ в Redis удаляется.
-5. **Авто-refresh:** access_token живёт 120 сек (`accessTokenLifespan: 120`),
-   TTL сессии — 1800 сек. Через >2 мин запрос всё ещё работает — Auth Proxy сам
-   обновил токен по refresh_token.
-
-✅ Ожидание: браузер видит только `session_id`; токены — в Redis; сессия
-переживает истечение access_token.
-
----
-
-## Задача 4 — LDAP-федерация + роли представительства
-
-**Цель:** Keycloak аутентифицирует пользователей из внешнего LDAP; роли синхронизируются.
-
-1. Проверить, что LDAP отдаёт пользователей:
-   ```bash
-   docker exec bionicpro-openldap \
-     ldapsearch -x -H ldap://localhost -b "dc=example,dc=com" \
-     -D "cn=admin,dc=example,dc=com" -w admin "(objectClass=inetOrgPerson)" dn
-   ```
-2. В админке Keycloak → User Federation → `ldap-bionicpro` → **Test connection**
-   и **Test authentication** = успех. Нажать **Synchronize all users**.
-3. Users → найти `john.doe`, `jane.smith` — импортированы из LDAP.
-4. Войти под `john.doe` / `password` (через <http://localhost:3000>).
-5. Проверить роли: у `john.doe` и `alex.johnson` должна быть роль
-   `prothetic_user`, у `jane.smith` — `user` (маппинг из LDAP-групп `ou=Groups`).
-
-> ⚠️ Известная особенность: в [`ldap/config.ldif`](ldap/config.ldif) DN Alex —
-> `uid=alex`, а группа ссылается на `uid=alex.johnson`. Из-за несоответствия DN
-> Alex может не получить роль. Подробности — в [`ldap/README.md`](ldap/README.md).
-
-✅ Ожидание: LDAP-пользователи входят через Keycloak и получают realm-роли из групп.
-
----
-
-## Задача 5 — Обязательный OTP (2FA)
-
-**Цель:** после пароля обязателен одноразовый код из Google Authenticator/FreeOTP.
-
-1. В админке Keycloak → realm `reports-realm` → Authentication → **Policies →
-   OTP Policy**: тип **TOTP**, HmacSHA1, 6 цифр, период 30 сек.
-2. Authentication → **Required Actions** → **Configure OTP** = Enabled +
-   **Default Action = ON**.
-3. Войти новым пользователем (например `user1` / `password123`) через
-   <http://localhost:3000>:
-   - после пароля Keycloak покажет **QR-код** для привязки OTP;
-   - отсканировать в Google Authenticator / FreeOTP, ввести 6-значный код.
-4. Выйти и войти снова — Keycloak запросит **актуальный OTP-код**; без него
-   вход невозможен.
-
-✅ Ожидание: вход завершается только после ввода корректного OTP.
-
----
-
-## Задача 6 — Identity Brokering через Яндекс ID + согласие + профиль в CRM
-
-**Цель:** вход через Яндекс; сервис спрашивает разрешение и сохраняет профиль в БД.
-
-1. На <http://localhost:3000> нажать **«Войти через Яндекс ID»**.
-   - Auth Proxy редиректит с `kc_idp_hint=yandex`, Keycloak — на Яндекс OAuth.
-2. Авторизоваться в Яндексе, вернуться в приложение.
-3. Приложение показывает экран **«Разрешение на использование данных»**
-   (сработал `needs_consent=true` из `/auth/userinfo`).
-4. Нажать **«Разрешаю»**. Auth Proxy:
-   - фиксирует согласие в CRM;
-   - забирает токен Яндекса из Keycloak (`/broker/yandex/token`, `storeToken=true`);
-   - запрашивает профиль у Яндекса (`login.yandex.ru/info`);
-   - сохраняет профиль в CRM.
-5. Проверить сохранённые данные:
-   ```bash
-   # через CRM API
-   curl "http://localhost:8090/users/profile/<sub>"
-
-   # напрямую в БД CRM
-   docker exec -it bionicpro-crm-db \
-     psql -U crm_user -d crm_db \
-     -c "SELECT subject, email, display_name FROM crm.user_profile;"
-   docker exec -it bionicpro-crm-db \
-     psql -U crm_user -d crm_db \
-     -c "SELECT subject, granted, created_at FROM crm.user_consent;"
-   ```
-6. **Проверка отказа:** войдя новым Яндекс-аккаунтом и нажав «Не разрешаю»,
-   убедиться, что в `crm.user_consent` записан `granted=false`, а в
-   `crm.user_profile` профиля нет.
-
-✅ Ожидание: профиль из Яндекса попадает в CRM **только** после явного согласия;
-решение (в т.ч. отказ) фиксируется в журнале согласий.
-
----
 
 ## Полезные адреса
 
 - Frontend: <http://localhost:3000>
-- Keycloak admin: <http://localhost:8080> (`admin` / `admin`)
-- phpLDAPadmin: <http://localhost:8081> (`cn=admin,dc=example,dc=com` / `admin`)
+- Keycloak admin: <http://localhost:8080> (`admin`/`admin`)
+- phpLDAPadmin: <http://localhost:8081> (`cn=admin,dc=example,dc=com`/`admin`)
 - CRM API (Swagger): <http://localhost:8090/docs>
-- Auth Proxy health: <http://localhost:8000/health>
+- Airflow: <http://localhost:8082> (`admin`/`admin`)
+- Kafka UI: <http://localhost:8085>
 
 ## Остановка
 
 ```bash
-docker compose down          # остановить
-docker compose down -v       # остановить и удалить тома (сброс данных)
+docker compose down       # остановить
+docker compose down -v    # остановить и сбросить данные
 ```
