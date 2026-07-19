@@ -245,6 +245,22 @@ services:
       minio:
         condition: service_healthy
 
+  # Telemetry API — запись данных телеметрии с протезов в ClickHouse.
+  telemetry-api:
+    build:
+      context: ./telemetry-api
+      dockerfile: Dockerfile
+    ports:
+      - "8092:8080"
+    environment:
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_PORT: "8123"
+      CLICKHOUSE_USER: etl_user
+      CLICKHOUSE_PASSWORD: etl_password
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+
   minio:
     container_name: bionicpro-minio
     build:
