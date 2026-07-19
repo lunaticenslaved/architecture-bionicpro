@@ -5,7 +5,6 @@ RUN microdnf install -y jq curl && microdnf clean all
 USER kafka
 
 COPY --chown=kafka:kafka crm-connector-config.json /tmp/crm-connector-config.json
-COPY --chown=kafka:kafka telemetry-connector-config.json /tmp/telemetry-connector-config.json
 
 COPY --chown=kafka:kafka init-connector.sh /usr/local/bin/init-connector.sh
 RUN chmod +x /usr/local/bin/init-connector.sh

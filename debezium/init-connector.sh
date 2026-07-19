@@ -10,7 +10,6 @@ CONNECT_URL="http://localhost:8083"
 # Массив коннекторов: имя_коннектора:путь_к_конфигу
 CONNECTORS=(
   "crm-connector:/tmp/crm-connector-config.json"
-  "telemetry-connector:/tmp/telemetry-connector-config.json"
 )
 
 echo "[init-connector] Waiting for Kafka Connect REST API at ${CONNECT_URL}..."
