@@ -117,7 +117,7 @@ services:
 
   # Kafka (KRaft, один брокер). Без ZooKeeper — режим KRaft.
   kafka:
-    image: bitnami/kafka:3.7
+    image: confluentinc/cp-kafka:7.7.0
     container_name: bionicpro-kafka
     environment:
       # Режим KRaft: один узел выполняет роли broker + controller.
@@ -143,8 +143,11 @@ services:
       start_period: 30s
 
   # Kafka Connect + Debezium — CDC-коннектор к PostgreSQL.
+  # Инициализация коннектора происходит внутри контейнера через init.sh.
   kafka-connect:
-    image: debezium/connect:2.7
+    build:
+      context: ./debezium
+      dockerfile: Dockerfile
     container_name: bionicpro-kafka-connect
     environment:
       BOOTSTRAP_SERVERS: kafka:9092
@@ -170,30 +173,6 @@ services:
       timeout: 5s
       retries: 20
       start_period: 30s
-
-  # Одноразовая инициализация: регистрация Debezium-коннектора через REST API.
-  debezium-init:
-    image: curlimages/curl:8.6
-    container_name: bionicpro-debezium-init
-    depends_on:
-      kafka-connect:
-        condition: service_healthy
-    volumes:
-      - ./debezium/crm-connector.json:/crm-connector.json:ro
-    entrypoint:
-      - /bin/sh
-      - -c
-      - |
-        echo "Waiting for Kafka Connect to be ready..."
-        sleep 5
-        echo "Registering Debezium PostgreSQL connector..."
-        curl -f -X PUT -H "Content-Type: application/json" \
-          --data @/crm-connector.json \
-          http://kafka-connect:8083/connectors/crm-connector/config
-        echo ""
-        echo "Connector registered. Checking status..."
-        curl -f http://kafka-connect:8083/connectors/crm-connector/status
-        echo ""
 
   # CRM API — владелец клиентских данных. Сюда сохраняется профиль
   # пользователя из Яндекса и журнал согласий. Auth Proxy ходит только сюда,
