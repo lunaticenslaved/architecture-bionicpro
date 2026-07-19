@@ -254,6 +254,7 @@ docker exec -i bionicpro-clickhouse clickhouse-client -u etl_user --password etl
 SELECT subject, prosthesis_serial, event_date, events_count, avg_response_ms
 FROM olap.user_prosthesis_report_mart_v2
 WHERE subject = '11111111-1111-1111-1111-111111111111'
+ORDER BY event_time DESC
 LIMIT 5
 FORMAT PrettyCompact
 "

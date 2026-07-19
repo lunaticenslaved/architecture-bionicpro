@@ -9,6 +9,12 @@
 -- 1. База данных CDC
 -- ===================================================================
 CREATE DATABASE IF NOT EXISTS cdc;
+CREATE DATABASE IF NOT EXISTS olap;
+
+DROP TABLE IF EXISTS cdc.mv_user_profile;
+DROP TABLE IF EXISTS cdc.mv_prosthesis;
+DROP TABLE IF EXISTS cdc.kafka_user_profile;
+DROP TABLE IF EXISTS cdc.kafka_prosthesis;
 
 -- ===================================================================
 -- 2. KafkaEngine-таблицы — потребители топиков Debezium
@@ -30,9 +36,9 @@ CREATE TABLE IF NOT EXISTS cdc.kafka_user_profile
     email           String,
     created_at      Nullable(String),  -- ISO-8601 от Debezium, парсим в MV
     updated_at      Nullable(String),
-    op              String,            -- 'c'=create,'u'=update,'d'=delete,'r'=read(snapshot)
+    __op              String,            -- 'c'=create,'u'=update,'d'=delete,'r'=read(snapshot)
     __ts_ms         Int64,             -- миллисекунды эпохи (версия строки)
-    deleted         String             -- Debezium присылает строку "true"/"false"
+    __deleted         String             -- Debezium присылает строку "true"/"false"
 )
 ENGINE = Kafka(
     'kafka:9092',
@@ -53,9 +59,9 @@ CREATE TABLE IF NOT EXISTS cdc.kafka_prosthesis
     model             String,
     firmware_version  String,
     purchased_at      Nullable(String),  -- ISO-8601 от Debezium, парсим в MV
-    op                String,
+    __op                String,
     __ts_ms           Int64,
-    deleted           String             -- строка "true"/"false"
+    __deleted           String             -- строка "true"/"false"
 )
 ENGINE = Kafka(
     'kafka:9092',
@@ -128,7 +134,7 @@ AS SELECT
     parseDateTimeBestEffortOrZero(coalesce(created_at, '')) AS created_at,
     parseDateTimeBestEffortOrZero(coalesce(updated_at, '')) AS updated_at,
     __ts_ms,
-    if(deleted = 'true', 1, 0) AS is_deleted
+    if(__deleted = 'true', 1, 0) AS is_deleted
 FROM cdc.kafka_user_profile
 WHERE __ts_ms > 0;
 
@@ -143,7 +149,7 @@ AS SELECT
     firmware_version,
     parseDateTimeBestEffortOrZero(coalesce(purchased_at, '')) AS purchased_at,
     __ts_ms,
-    if(deleted = 'true', 1, 0) AS is_deleted
+    if(__deleted = 'true', 1, 0) AS is_deleted
 FROM cdc.kafka_prosthesis
 WHERE __ts_ms > 0;
 
