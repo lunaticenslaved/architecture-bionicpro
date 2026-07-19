@@ -15,6 +15,8 @@ CREATE DATABASE IF NOT EXISTS cdc;
 -- ===================================================================
 
 -- Таблица-потребитель топика crm.crm.user_profile
+-- Имена полей точно соответствуют тому, что шлёт Debezium ExtractNewRecordState:
+--   "op":"r"   (без префикса __), "__ts_ms":..., "deleted":"false" (строка, без префикса __)
 CREATE TABLE IF NOT EXISTS cdc.kafka_user_profile
 (
     id              Int32,
@@ -22,15 +24,15 @@ CREATE TABLE IF NOT EXISTS cdc.kafka_user_profile
     provider        String,
     external_id     String,
     username        String,
-    first_name      String,
-    last_name       String,
+    first_name      Nullable(String),
+    last_name       Nullable(String),
     display_name    String,
     email           String,
-    created_at      String,   -- ISO-8601 от Debezium, парсим в MV
-    updated_at      String,
-    __op            String,   -- 'c'=create, 'u'=update, 'd'=delete
-    __ts_ms         Int64,    -- миллисекунды эпохи (версия строки)
-    __deleted       Boolean   -- true для DELETE (rewrite mode)
+    created_at      Nullable(String),  -- ISO-8601 от Debezium, парсим в MV
+    updated_at      Nullable(String),
+    op              String,            -- 'c'=create,'u'=update,'d'=delete,'r'=read(snapshot)
+    __ts_ms         Int64,             -- миллисекунды эпохи (версия строки)
+    deleted         String             -- Debezium присылает строку "true"/"false"
 )
 ENGINE = Kafka(
     'kafka:9092',
@@ -39,7 +41,8 @@ ENGINE = Kafka(
     'JSONEachRow'
 )
 SETTINGS kafka_thread_per_consumer = 1,
-         kafka_num_consumers = 1;
+         kafka_num_consumers = 1,
+         input_format_skip_unknown_fields = 1;  -- пропускаем raw_profile и прочие неизвестные поля
 
 -- Таблица-потребитель топика crm.crm.prosthesis
 CREATE TABLE IF NOT EXISTS cdc.kafka_prosthesis
@@ -49,10 +52,10 @@ CREATE TABLE IF NOT EXISTS cdc.kafka_prosthesis
     subject           String,
     model             String,
     firmware_version  String,
-    purchased_at      String,   -- ISO-8601 от Debezium, парсим в MV
-    __op              String,
+    purchased_at      Nullable(String),  -- ISO-8601 от Debezium, парсим в MV
+    op                String,
     __ts_ms           Int64,
-    __deleted         Boolean
+    deleted           String             -- строка "true"/"false"
 )
 ENGINE = Kafka(
     'kafka:9092',
@@ -61,7 +64,8 @@ ENGINE = Kafka(
     'JSONEachRow'
 )
 SETTINGS kafka_thread_per_consumer = 1,
-         kafka_num_consumers = 1;
+         kafka_num_consumers = 1,
+         input_format_skip_unknown_fields = 1;
 
 -- ===================================================================
 -- 3. Целевые ReplacingMergeTree-таблицы (версионированные по __ts_ms)
@@ -117,14 +121,14 @@ AS SELECT
     provider,
     external_id,
     username,
-    first_name,
-    last_name,
+    coalesce(first_name, '')  AS first_name,
+    coalesce(last_name, '')   AS last_name,
     display_name,
     email,
-    parseDateTimeBestEffortOrZero(created_at) AS created_at,
-    parseDateTimeBestEffortOrZero(updated_at) AS updated_at,
+    parseDateTimeBestEffortOrZero(coalesce(created_at, '')) AS created_at,
+    parseDateTimeBestEffortOrZero(coalesce(updated_at, '')) AS updated_at,
     __ts_ms,
-    if(__deleted, 1, 0) AS is_deleted
+    if(deleted = 'true', 1, 0) AS is_deleted
 FROM cdc.kafka_user_profile
 WHERE __ts_ms > 0;
 
@@ -137,9 +141,9 @@ AS SELECT
     subject,
     model,
     firmware_version,
-    parseDateTimeBestEffortOrZero(purchased_at) AS purchased_at,
+    parseDateTimeBestEffortOrZero(coalesce(purchased_at, '')) AS purchased_at,
     __ts_ms,
-    if(__deleted, 1, 0) AS is_deleted
+    if(deleted = 'true', 1, 0) AS is_deleted
 FROM cdc.kafka_prosthesis
 WHERE __ts_ms > 0;
 
