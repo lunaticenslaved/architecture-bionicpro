@@ -178,6 +178,23 @@ services:
       retries: 20
       start_period: 30s
 
+  # Kafka UI — веб-интерфейс для просмотра топиков, сообщений и коннекторов.
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: bionicpro-kafka-ui
+    ports:
+      - "8085:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: bionicpro-cdc
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+      KAFKA_CLUSTERS_0_KAFKACONNECT_0_NAME: bionicpro-connect
+      KAFKA_CLUSTERS_0_KAFKACONNECT_0_ADDRESS: http://kafka-connect:8083
+    depends_on:
+      kafka:
+        condition: service_healthy
+      kafka-connect:
+        condition: service_healthy
+
   # CRM API — владелец клиентских данных. Сюда сохраняется профиль
   # пользователя из Яндекса и журнал согласий. Auth Proxy ходит только сюда,
   # напрямую в БД не лезет (соблюдение границ сервисов).
