@@ -15,6 +15,8 @@ DROP TABLE IF EXISTS cdc.mv_user_profile;
 DROP TABLE IF EXISTS cdc.mv_prosthesis;
 DROP TABLE IF EXISTS cdc.kafka_user_profile;
 DROP TABLE IF EXISTS cdc.kafka_prosthesis;
+DROP TABLE IF EXISTS cdc.user_profile;
+DROP TABLE IF EXISTS cdc.prosthesis;
 
 -- ===================================================================
 -- 2. KafkaEngine-таблицы — потребители топиков Debezium
@@ -92,7 +94,8 @@ CREATE TABLE IF NOT EXISTS cdc.user_profile
     created_at      DateTime,
     updated_at      DateTime,
     __ts_ms         Int64,      -- версия строки (монотонно растёт)
-    is_deleted      UInt8       -- 1 = строка удалена в CRM
+    is_deleted      UInt8,       -- 1 = строка удалена в CRM
+    __deleted       String
 )
 ENGINE = ReplacingMergeTree(__ts_ms)
 ORDER BY (subject)
@@ -134,7 +137,8 @@ AS SELECT
     parseDateTimeBestEffortOrZero(coalesce(created_at, '')) AS created_at,
     parseDateTimeBestEffortOrZero(coalesce(updated_at, '')) AS updated_at,
     __ts_ms,
-    if(__deleted = 'true', 1, 0) AS is_deleted
+    if(__deleted = 'true', 1, 0) AS is_deleted,
+    __deleted
 FROM cdc.kafka_user_profile
 WHERE __ts_ms > 0;
 
