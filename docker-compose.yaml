@@ -385,6 +385,20 @@ services:
       kafka:
         condition: service_healthy
 
+  # ClickHouse UI (Tabix) — веб-интерфейс для выполнения запросов и просмотра БД.
+  clickhouse-ui:
+    image: spoonest/clickhouse-tabix-web-client:latest
+    container_name: bionicpro-clickhouse-ui
+    ports:
+      - "8086:80"
+    environment:
+      CH_HOST: http://clickhouse:8123
+      CH_USER: etl_user
+      CH_PASSWORD: etl_password
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+
   # Метаданные Airflow.
   airflow_db:
     image: postgres:14

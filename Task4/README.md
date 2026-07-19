@@ -117,10 +117,11 @@ graph LR
 
 | Сервис | Образ | Назначение |
 |---|---|---|
-| `kafka` | bitnami/kafka:3.7 | KRaft-брокер (broker+controller), порт 9092 (внутренний) |
-| `kafka-connect` | debezium/connect:2.7 | Kafka Connect + Debezium, REST API :8084 |
-| `debezium-init` | curlimages/curl:8.6 | Одноразовая регистрация коннектора |
+| `kafka` | confluentinc/cp-kafka:7.7.0 | KRaft-брокер (broker+controller), порт 9092 (внутренний) |
+| `kafka-connect` | debezium/connect:2.7.3.Final (кастомный) | Kafka Connect + Debezium, инициализация коннектора при старте, REST API :8084 |
+| `kafka-ui` | provectuslabs/kafka-ui:latest | Веб-интерфейс Kafka (топики, сообщения, коннекторы) |
 | `clickhouse-cdc-init` | clickhouse/clickhouse-server:24.3 | Одноразовое применение CDC-схемы |
+| `clickhouse-ui` | spoonest/clickhouse-tabix-web-client:latest | Веб-интерфейс ClickHouse (SQL-запросы, просмотр БД) |
 
 ## Изменения в существующих сервисах
 
@@ -144,6 +145,8 @@ graph LR
 |---|---|---|
 | kafka | — | только внутренняя сеть, kafka:9092 |
 | kafka-connect | 8084 | REST API Debezium (8083 занят minio-nginx) |
+| kafka-ui | 8085 | Веб-интерфейс Kafka (топики, сообщения, Connect) |
+| clickhouse-ui | 8086 | Веб-интерфейс ClickHouse (Tabix, SQL-запросы) |
 | остальные | без изменений | |
 
 ## Инструкция по проверке
@@ -151,24 +154,37 @@ graph LR
 ### 1. Запуск
 
 ```bash
-docker-compose up -d
+docker-compose up -d --build
 ```
 
 Убедиться, что все сервисы healthy:
-- `kafka` — healthcheck через `kafka-topics.sh --list`
-- `kafka-connect` — healthcheck через `curl localhost:8083/connectors`
-- `debezium-init` — завершился успешно (connector registered)
+- `kafka` — healthcheck через `kafka-topics --list`
+- `kafka-connect` — инициализация коннектора внутри контейнера (см. логи)
 - `clickhouse-cdc-init` — завершился успешно (CDC schema applied)
 
-### 2. Проверка коннектора
+### 2. Проверка через веб-интерфейсы
+
+**Kafka UI** — http://localhost:8085
+- Вкладка **Topics** — проверить наличие топиков `crm.crm.user_profile` и `crm.crm.prosthesis`
+- Вкладка **Connect** — проверить статус коннектора `crm-connector` (должен быть RUNNING)
+- Вкладка **Messages** — просмотреть сообщения в топике
+
+**ClickHouse UI (Tabix)** — http://localhost:8086
+- Подключение уже настроено (user: `etl_user`, password: `etl_password`, host: `clickhouse:8123`)
+- Выполнить запрос для проверки CDC-таблиц:
+  ```sql
+  SELECT name, engine FROM system.tables WHERE database IN ('cdc', 'olap')
+  ```
+
+### 3. Проверка коннектора через REST API
 
 ```bash
-curl http://localhost:8084/connectors/crm-connector/status
+curl http://localhost:8084/connectors/crm-connector/status | jq .
 ```
 
 Ожидается: `"state": "RUNNING"`
 
-### 3. Проверка CDC: INSERT в CRM → ClickHouse
+### 4. Проверка CDC: INSERT в CRM → ClickHouse
 
 Вставить строку в CRM:
 ```bash
@@ -179,6 +195,15 @@ EOF
 ```
 
 Проверить появление в ClickHouse (через несколько секунд):
+
+**Через UI** — http://localhost:8086 → выполнить:
+```sql
+SELECT subject, username, display_name, email, is_deleted
+FROM cdc.user_profile FINAL
+WHERE subject = 'test-cdc-001'
+```
+
+**Через CLI:**
 ```bash
 docker exec -i bionicpro-clickhouse clickhouse-client -u etl_user --password etl_password --query "
 SELECT subject, username, display_name, email, is_deleted
@@ -188,7 +213,7 @@ FORMAT PrettyCompact
 "
 ```
 
-### 4. Проверка DELETE
+### 5. Проверка DELETE
 
 ```bash
 docker exec -i bionicpro-crm-db psql -U crm_user -d crm_db <<EOF
@@ -196,18 +221,24 @@ DELETE FROM crm.user_profile WHERE subject = 'test-cdc-001';
 EOF
 ```
 
-Проверить `is_deleted = 1`:
-```bash
-docker exec -i bionicpro-clickhouse clickhouse-client -u etl_user --password etl_password --query "
+Проверить `is_deleted = 1` через UI или CLI:
+```sql
 SELECT subject, is_deleted, __ts_ms
 FROM cdc.user_profile FINAL
 WHERE subject = 'test-cdc-001'
-FORMAT PrettyCompact
-"
 ```
 
-### 5. Проверка витрины отчётов
+### 6. Проверка витрины отчётов
 
+**Через UI** — http://localhost:8086:
+```sql
+SELECT subject, prosthesis_serial, event_date, events_count, avg_response_ms
+FROM olap.user_prosthesis_report_mart_v2
+WHERE subject = '11111111-1111-1111-1111-111111111111'
+LIMIT 5
+```
+
+**Через CLI:**
 ```bash
 docker exec -i bionicpro-clickhouse clickhouse-client -u etl_user --password etl_password --query "
 SELECT subject, prosthesis_serial, event_date, events_count, avg_response_ms
@@ -218,7 +249,7 @@ FORMAT PrettyCompact
 "
 ```
 
-### 6. Проверка Reports API
+### 7. Проверка Reports API
 
 ```bash
 curl -s http://localhost:8091/reports?days=7 \
