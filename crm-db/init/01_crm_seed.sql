@@ -4,6 +4,11 @@
 
 CREATE SCHEMA IF NOT EXISTS crm;
 
+-- REPLICA IDENTITY FULL нужен для Debezium CDC:
+-- при DEFAULT PostgreSQL пишет в WAL для DELETE только PK (id),
+-- все остальные поля (subject, display_name и т.д.) будут NULL.
+-- FULL заставляет PostgreSQL включать ВСЕ столбцы в before-image.
+
 CREATE TABLE IF NOT EXISTS crm.user_profile (
     id            SERIAL PRIMARY KEY,
     subject       TEXT NOT NULL UNIQUE,      -- sub из access_token Keycloak
@@ -18,6 +23,7 @@ CREATE TABLE IF NOT EXISTS crm.user_profile (
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+ALTER TABLE crm.user_profile REPLICA IDENTITY FULL;
 
 CREATE TABLE IF NOT EXISTS crm.user_consent (
     id            SERIAL PRIMARY KEY,
@@ -40,6 +46,8 @@ CREATE TABLE IF NOT EXISTS crm.prosthesis (
     firmware_version  TEXT,
     purchased_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+ALTER TABLE crm.prosthesis REPLICA IDENTITY FULL;
+
 CREATE INDEX IF NOT EXISTS idx_prosthesis_subject
     ON crm.prosthesis (subject);
 
